@@ -188,7 +188,9 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
           const otherFile = files.find((ff) => ff.id === p.otherFileId);
           const active = fileStore.getActiveFile();
           if (!otherFile || !active) return false;
-          const result = differ.mergeFiles(active, otherFile, p.keys as string[], p.mode as any);
+          const suffixes = (p.suffixes as { left?: string; right?: string } | undefined) ?? { left: '_左', right: '_右' };
+          const conflictStrategy = (p.conflictStrategy as any) ?? 'keep_both';
+          const result = differ.mergeFiles(active, otherFile, p.keys as string[], p.mode as any, suffixes, conflictStrategy);
           fileStore.addFile(result.file);
           return true;
         }

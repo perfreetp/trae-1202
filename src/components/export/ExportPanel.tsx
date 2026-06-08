@@ -1,14 +1,47 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useFileStore } from '../../store/useFileStore';
 import { useUiStore } from '../../store/useUiStore';
 import { useWorkflowStore } from '../../store/useWorkflowStore';
 import { exportFile, triggerDownload, type ExportFormat, type ExportRange, type ExportOptions } from '../../engine/exporter';
+import type { CsvFile, DataRow } from '../../engine/types';
 import { Button } from '../common/Button';
 import { Select, Checkbox, Input } from '../common/Form';
 import { Badge } from '../common/Badge';
 import { formatNumber, formatBytes } from '../../utils/detectType';
 import { cn } from '../../lib/utils';
-import { Download, FileSpreadsheet, FileText, CheckCircle2, Settings2 } from 'lucide-react';
+import {
+  Download,
+  FileSpreadsheet,
+  FileText,
+  CheckCircle2,
+  Settings2,
+  Eye,
+  FileOutput,
+  Hash,
+  Target,
+  Layers,
+} from 'lucide-react';
+
+const PREVIEW_ROW_LIMIT = 20;
+
+function getExportScopeRows(f: CsvFile, range: ExportRange, selectedIds: Set<string>, sampleN: number): DataRow[] {
+  switch (range) {
+    case 'selected': {
+      const idToRow = new Map(f.rows.map((r) => [r._id, r]));
+      const ordered: DataRow[] = [];
+      f.rows.forEach((r) => {
+        if (selectedIds.has(r._id)) ordered.push(r);
+      });
+      return ordered;
+    }
+    case 'sample':
+      return f.rows.slice(0, sampleN);
+    case 'all':
+    case 'filtered':
+    default:
+      return f.rows;
+  }
+}
 
 export const ExportPanel: React.FC = () => {
   const f = useFileStore((s) => s.getActiveFile());
@@ -49,7 +82,19 @@ export const ExportPanel: React.FC = () => {
       ? f.rowCount
       : range === 'selected'
       ? selectedRowIds.size
-      : sampleSize;
+      : Math.min(sampleSize, f.rowCount);
+
+  const finalFileName = useMemo(() => {
+    const base = fileName?.trim() || f.name.replace(/\.(csv|xlsx)$/i, '');
+    return `${base}.${format}`;
+  }, [fileName, f.name, format]);
+
+  const scopeRows = useMemo(
+    () => getExportScopeRows(f, range, selectedRowIds, sampleSize),
+    [f, range, selectedRowIds, sampleSize]
+  );
+
+  const previewRows = useMemo(() => scopeRows.slice(0, PREVIEW_ROW_LIMIT), [scopeRows]);
 
   const doExport = () => {
     const options: ExportOptions = {
@@ -80,6 +125,18 @@ export const ExportPanel: React.FC = () => {
       showToast({ type: 'error', message: `导出失败: ${(e as Error).message}` });
     }
   };
+
+  const fmt = (v: unknown): string => {
+    if (v === null || v === undefined || v === '') return <span className="text-slate-300 italic">空</span> as unknown as string;
+    return typeof v === 'number' ? formatNumber(v) : String(v);
+  };
+
+  const rangeLabel = {
+    all: '全部数据',
+    filtered: '筛选后',
+    selected: '仅选中行',
+    sample: `抽样前 ${formatNumber(sampleSize)} 行`,
+  }[range];
 
   return (
     <div className="space-y-4">
@@ -267,6 +324,117 @@ export const ExportPanel: React.FC = () => {
         </div>
       </div>
 
+      <div className="rounded-xl border border-teal-200 bg-gradient-to-br from-teal-50/60 to-emerald-50/40 p-4 space-y-3">
+        <div className="flex items-center flex-wrap gap-2 text-sm font-semibold text-teal-900">
+          <Eye size={15} /> 导出前确认预览
+          <Badge size="sm" variant="info" className="ml-2">
+            文件名：{finalFileName}
+          </Badge>
+          <Badge size="sm" variant="success" className="ml-1">
+            范围：{rangeLabel}
+          </Badge>
+          <Badge size="sm" variant="default" className="ml-1">
+            表头：{includeHeader ? '包含' : '不包含'}
+          </Badge>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+          <MiniStat
+            icon={<FileOutput size={13} />}
+            label="预计总导出"
+            value={`${formatNumber(estimatedRows)} 行`}
+            color="teal"
+          />
+          <MiniStat
+            icon={<Layers size={13} />}
+            label="当前预览显示"
+            value={`${formatNumber(previewRows.length)} 行`}
+            color="indigo"
+          />
+          <MiniStat
+            icon={<Hash size={13} />}
+            label="列数 / 顺序"
+            value={`${cols.length} 列`}
+            color="amber"
+          />
+          <MiniStat
+            icon={<Target size={13} />}
+            label="格式"
+            value={format.toUpperCase()}
+            color="emerald"
+          />
+        </div>
+
+        <div className="rounded-lg border border-teal-200 bg-white overflow-hidden">
+          <div className="px-3 py-2 bg-teal-50/70 border-b border-teal-200 flex items-center justify-between flex-wrap gap-2">
+            <div className="text-xs font-semibold text-teal-900">
+              {scopeRows.length > PREVIEW_ROW_LIMIT
+                ? `前 ${PREVIEW_ROW_LIMIT} 行预览（省略 ${formatNumber(scopeRows.length - PREVIEW_ROW_LIMIT)} 行）`
+                : previewRows.length > 0
+                ? '已展示全部范围内的行'
+                : '范围内无数据可导出'}
+            </div>
+            <div className="text-[11px] text-teal-700">
+              列顺序：<span className="font-mono">{cols.length > 0 ? cols.join(' → ') : '（未选择任何列）'}</span>
+            </div>
+          </div>
+          <div className="overflow-auto max-h-96">
+            {cols.length === 0 ? (
+              <div className="p-8 text-center text-xs text-rose-500">
+                ⚠️ 请至少选择一列进行导出
+              </div>
+            ) : previewRows.length === 0 ? (
+              <div className="p-8 text-center text-xs text-slate-400">
+                {range === 'selected' ? '当前没有选中任何行' : '范围内没有数据'}
+              </div>
+            ) : (
+              <table className="w-full text-[11px]">
+                <thead className="bg-slate-100 sticky top-0 z-10">
+                  <tr>
+                    <th className="px-2 py-1.5 text-left w-8 border-r border-slate-200">#</th>
+                    {cols.map((h) => (
+                      <th
+                        key={h}
+                        className="px-2 py-1.5 text-left border-r border-slate-200 whitespace-nowrap font-medium text-slate-700"
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {previewRows.map((r, i) => (
+                    <tr key={r._id} className={range === 'selected' ? 'bg-sky-50/40' : 'bg-white'}>
+                      <td className="px-2 py-1 border-r border-slate-100 text-slate-400 tabular-nums">
+                        {i + 1}
+                        {range === 'selected' && (
+                          <span className="ml-1 text-sky-500">★</span>
+                        )}
+                      </td>
+                      {cols.map((h) => (
+                        <td key={h} className="px-2 py-1 border-r border-slate-100 whitespace-nowrap">
+                          {fmt(r.values[h])}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+          {range === 'sample' && previewRows.length > 0 && (
+            <div className="px-3 py-1.5 border-t border-teal-100 bg-amber-50/50 text-[11px] text-amber-700">
+              🧪 抽样模式（前 {formatNumber(sampleSize)} 行）：实际导出与预览范围一致
+            </div>
+          )}
+          {range === 'selected' && previewRows.length > 0 && (
+            <div className="px-3 py-1.5 border-t border-teal-100 bg-sky-50/50 text-[11px] text-sky-700">
+              ⭐ 仅导出选中行模式：预览中每行前的 ★ 标记表示选中，顺序与表格中一致
+            </div>
+          )}
+        </div>
+      </div>
+
       <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-xl bg-gradient-to-r from-teal-50 to-emerald-50 border border-teal-200">
         <div>
           <div className="text-sm font-semibold text-teal-900">确认导出当前文件处理结果</div>
@@ -298,6 +466,32 @@ export const ExportPanel: React.FC = () => {
           </Button>
         </div>
       </div>
+    </div>
+  );
+};
+
+const MiniStat: React.FC<{
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  color: 'teal' | 'indigo' | 'amber' | 'emerald' | 'rose' | 'sky';
+}> = ({ icon, label, value, color }) => {
+  const map: Record<string, string> = {
+    teal: 'from-teal-500 to-teal-600',
+    indigo: 'from-indigo-500 to-indigo-600',
+    amber: 'from-amber-500 to-amber-600',
+    emerald: 'from-emerald-500 to-emerald-600',
+    rose: 'from-rose-500 to-rose-600',
+    sky: 'from-sky-500 to-sky-600',
+  };
+  return (
+    <div className="relative rounded-lg border border-white bg-white/80 p-2.5 overflow-hidden shadow-sm">
+      <div className={`absolute -top-8 -right-8 w-16 h-16 rounded-full bg-gradient-to-br ${map[color]} opacity-10`} />
+      <div className="relative flex items-center gap-1.5 text-slate-500">
+        {icon}
+        <span className="text-[10.5px] font-medium">{label}</span>
+      </div>
+      <div className="relative mt-0.5 text-sm font-bold text-slate-900 tabular-nums break-all">{value}</div>
     </div>
   );
 };

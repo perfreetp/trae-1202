@@ -2,7 +2,13 @@ import React, { useMemo, useState } from 'react';
 import { useFileStore } from '../../store/useFileStore';
 import { useUiStore } from '../../store/useUiStore';
 import { useWorkflowStore } from '../../store/useWorkflowStore';
-import { compareFiles, mergeFiles, type JoinMode } from '../../engine/differ';
+import {
+  compareFiles,
+  mergeFiles,
+  buildMerge,
+  type JoinMode,
+  type ConflictStrategy,
+} from '../../engine/differ';
 import type { DiffResult } from '../../engine/types';
 import { Button } from '../common/Button';
 import { Select, Checkbox, Input } from '../common/Form';
@@ -10,9 +16,23 @@ import { Badge } from '../common/Badge';
 import { Tabs } from '../common/Tabs';
 import { formatNumber } from '../../utils/detectType';
 import { cn } from '../../lib/utils';
-import { ArrowLeftRight, GitMerge, CircleCheck, CircleMinus, CirclePlus, GitCompare, AlertCircle, Hash, Target } from 'lucide-react';
+import {
+  ArrowLeftRight,
+  GitMerge,
+  CircleCheck,
+  CircleMinus,
+  CirclePlus,
+  GitCompare,
+  AlertCircle,
+  Hash,
+  Target,
+  Eye,
+  Layers,
+  FileOutput,
+  ListTree,
+} from 'lucide-react';
 
-type ViewMode = 'diff' | 'side';
+type ViewMode = 'diff' | 'side' | 'merge-preview';
 
 export const ComparePanel: React.FC = () => {
   const { files, activeFileId, addFile } = useFileStore();
@@ -22,6 +42,7 @@ export const ComparePanel: React.FC = () => {
 
   const [keys, setKeys] = useState<string[]>([]);
   const [joinMode, setJoinMode] = useState<JoinMode>('full');
+  const [conflictStrategy, setConflictStrategy] = useState<ConflictStrategy>('keep_both');
   const [view, setView] = useState<ViewMode>('diff');
   const [leftSuffix, setLeftSuffix] = useState('_左表');
   const [rightSuffix, setRightSuffix] = useState('_右表');
@@ -37,6 +58,19 @@ export const ComparePanel: React.FC = () => {
       return null;
     }
   }, [leftFile, rightFile, keys.join('|'), joinMode]);
+
+  const mergePreview = useMemo(() => {
+    if (!leftFile || !rightFile || keys.length === 0) return null;
+    try {
+      return buildMerge(leftFile, rightFile, keys, {
+        mode: joinMode,
+        suffixes: { left: leftSuffix, right: rightSuffix },
+        conflictStrategy,
+      });
+    } catch {
+      return null;
+    }
+  }, [leftFile, rightFile, keys.join('|'), joinMode, conflictStrategy, leftSuffix, rightSuffix]);
 
   if (files.length < 2) {
     return (
@@ -57,6 +91,7 @@ export const ComparePanel: React.FC = () => {
   }
 
   const allHeaders = Array.from(new Set([...(leftFile?.headers ?? []), ...(rightFile?.headers ?? [])]));
+  const strategyDisabled = conflictStrategy !== 'keep_both';
 
   return (
     <div className="space-y-4">
@@ -112,11 +147,12 @@ export const ComparePanel: React.FC = () => {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
           <Select
             label="比对/连接模式"
             value={joinMode}
             onChange={(v) => setJoinMode(v as JoinMode)}
+            className="md:col-span-3"
             options={[
               { label: '完全外连接 (FULL)', value: 'full' },
               { label: '左连接 (LEFT)', value: 'left' },
@@ -125,43 +161,181 @@ export const ComparePanel: React.FC = () => {
             ]}
           />
           <Select
+            label="冲突列处理策略"
+            value={conflictStrategy}
+            onChange={(v) => setConflictStrategy(v as ConflictStrategy)}
+            className="md:col-span-4"
+            options={[
+              { label: '保留左右两列（加后缀区分）', value: 'keep_both' },
+              { label: '只保留左表的值', value: 'keep_left' },
+              { label: '只保留右表的值', value: 'keep_right' },
+              { label: '右表有值就覆盖左表（否则保留左表）', value: 'right_coalesce' },
+            ]}
+          />
+          <Select
             label="展示方式"
             value={view}
             onChange={(v) => setView(v as ViewMode)}
+            className="md:col-span-2"
             options={[
               { label: '差异统计', value: 'diff' },
+              { label: '合并预览', value: 'merge-preview' },
               { label: '双表并排', value: 'side' },
             ]}
           />
-          <Button
-            variant="primary"
-            disabled={keys.length === 0 || !rightFile}
-            leftIcon={<GitMerge size={14} />}
-            onClick={() => {
-              if (!leftFile || !rightFile) return;
-              const { file } = mergeFiles(leftFile, rightFile, keys, joinMode, { left: leftSuffix, right: rightSuffix });
-              addFile(file);
-              addStep({
-                type: 'COMPARE',
-                payload: { otherFileId: rightFile.id, keys, mode: joinMode },
-                label: `合并 ${leftFile.name} ⇄ ${rightFile.name}`,
-              });
-              showToast({ type: 'success', message: `已生成合并结果：${file.name}` });
-            }}
-          >
-            生成合并表
-          </Button>
+          <div className="md:col-span-3">
+            <Button
+              variant="primary"
+              disabled={keys.length === 0 || !rightFile || !mergePreview}
+              leftIcon={<GitMerge size={14} />}
+              className="w-full"
+              onClick={() => {
+                if (!leftFile || !rightFile) return;
+                const { file } = mergeFiles(leftFile, rightFile, keys, joinMode, { left: leftSuffix, right: rightSuffix }, conflictStrategy);
+                addFile(file);
+                addStep({
+                  type: 'COMPARE',
+                  payload: { otherFileId: rightFile.id, keys, mode: joinMode, conflictStrategy, suffixes: { left: leftSuffix, right: rightSuffix } },
+                  label: `合并 ${leftFile.name} ⇄ ${rightFile.name}（${joinMode}）`,
+                });
+                showToast({ type: 'success', message: `已生成合并结果：${file.name}（${formatNumber(file.rowCount)} 行）` });
+              }}
+            >
+              生成合并表
+            </Button>
+          </div>
         </div>
 
         {view === 'side' && (
           <div className="grid grid-cols-2 gap-3">
-            <Input label="冲突列后缀（左表）" value={leftSuffix} onChange={setLeftSuffix} placeholder="_A / _左 ..." />
-            <Input label="冲突列后缀（右表）" value={rightSuffix} onChange={setRightSuffix} placeholder="_B / _右 ..." />
+            <Input label="冲突列后缀（左表）" value={leftSuffix} onChange={setLeftSuffix} placeholder="_A / _左 ..." disabled={strategyDisabled} />
+            <Input label="冲突列后缀（右表）" value={rightSuffix} onChange={setRightSuffix} placeholder="_B / _右 ..." disabled={strategyDisabled} />
           </div>
         )}
       </div>
 
-      {diff && (
+      {mergePreview && (
+        <div className="rounded-xl border border-indigo-200 bg-gradient-to-br from-indigo-50/60 to-violet-50/40 p-4 space-y-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-indigo-900">
+            <Eye size={15} /> 生成前预览
+            <Badge size="sm" variant="info" className="ml-2">
+              连接模式：{joinMode.toUpperCase()}
+            </Badge>
+            <Badge size="sm" variant="default" className="ml-1">
+              冲突策略：{conflictStrategy}
+            </Badge>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-2.5">
+            <MiniStat
+              icon={<FileOutput size={13} />}
+              label="输出总行数"
+              value={formatNumber(mergePreview.summary.totalRows)}
+              color="indigo"
+            />
+            <MiniStat
+              icon={<Layers size={13} />}
+              label="双表共同匹配"
+              value={formatNumber(mergePreview.summary.bothMatched)}
+              color="emerald"
+            />
+            <MiniStat
+              icon={<CircleCheck size={13} />}
+              label="左表匹配数"
+              value={formatNumber(mergePreview.summary.leftMatched)}
+              color="teal"
+            />
+            <MiniStat
+              icon={<CircleCheck size={13} />}
+              label="右表匹配数"
+              value={formatNumber(mergePreview.summary.rightMatched)}
+              color="sky"
+            />
+            <MiniStat
+              icon={<CircleMinus size={13} />}
+              label="左表未匹配"
+              value={formatNumber(mergePreview.summary.unmatchedLeft)}
+              color="rose"
+            />
+            <MiniStat
+              icon={<CirclePlus size={13} />}
+              label="右表未匹配"
+              value={formatNumber(mergePreview.summary.unmatchedRight)}
+              color="amber"
+            />
+          </div>
+          <div className="rounded-lg border border-indigo-200 bg-white overflow-hidden">
+            <div className="px-3 py-2 bg-indigo-50/70 border-b border-indigo-200 flex items-center justify-between">
+              <div className="text-xs font-semibold text-indigo-900 flex items-center gap-1.5">
+                <ListTree size={13} /> 合并结果预览（前 30 行，共 {formatNumber(mergePreview.headers.length)} 列）
+              </div>
+              <Badge variant="default" size="sm">
+                {mergePreview.summary.totalRows > 30 ? `省略 ${formatNumber(mergePreview.summary.totalRows - 30)} 行` : '已展示全部'}
+              </Badge>
+            </div>
+            <div className="overflow-auto max-h-80">
+              <table className="w-full text-[11px]">
+                <thead className="bg-slate-100 sticky top-0 z-10">
+                  <tr>
+                    <th className="px-2 py-1.5 text-left w-8 border-r border-slate-200">#</th>
+                    <th className="px-2 py-1.5 text-left w-14 border-r border-slate-200">状态</th>
+                    {mergePreview.headers.map((h) => (
+                      <th
+                        key={h}
+                        className={cn(
+                          'px-2 py-1.5 text-left border-r border-slate-200 whitespace-nowrap font-medium text-slate-700',
+                          mergePreview.conflictingCols.includes(h) && 'bg-amber-50 text-amber-800'
+                        )}
+                      >
+                        {h}
+                        {mergePreview.conflictingCols.includes(h) && (
+                          <span className="ml-1 text-[9px] text-amber-600">[冲突]</span>
+                        )}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {mergePreview.rows.slice(0, 30).map((r, i) => {
+                    const statusBadge = {
+                      unchanged: { label: '不变', variant: 'default' as const, cls: 'bg-white' },
+                      modified: { label: '修改', variant: 'warning' as const, cls: 'bg-amber-50' },
+                      'left-only': { label: '左独有', variant: 'danger' as const, cls: 'bg-rose-50' },
+                      'right-only': { label: '右独有', variant: 'success' as const, cls: 'bg-emerald-50' },
+                    }[r.status] ?? { label: '-', variant: 'default' as const, cls: 'bg-white' };
+                    return (
+                      <tr key={i} className={statusBadge.cls}>
+                        <td className="px-2 py-1 border-r border-slate-100 text-slate-400 tabular-nums">{i + 1}</td>
+                        <td className="px-2 py-1 border-r border-slate-100">
+                          <Badge variant={statusBadge.variant} size="sm">
+                            {statusBadge.label}
+                          </Badge>
+                        </td>
+                        {mergePreview.headers.map((h) => (
+                          <td key={h} className="px-2 py-1 border-r border-slate-100 whitespace-nowrap">
+                            {fmt(r.values[h])}
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                  {mergePreview.rows.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={mergePreview.headers.length + 2}
+                        className="px-4 py-8 text-center text-xs text-slate-400"
+                      >
+                        当前连接模式下无输出行
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {diff && view === 'diff' && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <StatCard
@@ -305,6 +479,32 @@ const Legend: React.FC<{ color: string; label: string }> = ({ color, label }) =>
     <span>{label}</span>
   </div>
 );
+
+const MiniStat: React.FC<{
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  color: 'indigo' | 'emerald' | 'teal' | 'sky' | 'rose' | 'amber';
+}> = ({ icon, label, value, color }) => {
+  const map: Record<string, string> = {
+    indigo: 'from-indigo-500 to-indigo-600',
+    emerald: 'from-emerald-500 to-emerald-600',
+    teal: 'from-teal-500 to-teal-600',
+    sky: 'from-sky-500 to-sky-600',
+    rose: 'from-rose-500 to-rose-600',
+    amber: 'from-amber-500 to-amber-600',
+  };
+  return (
+    <div className="relative rounded-lg border border-white bg-white/80 p-2.5 overflow-hidden shadow-sm">
+      <div className={`absolute -top-8 -right-8 w-16 h-16 rounded-full bg-gradient-to-br ${map[color]} opacity-10`} />
+      <div className="relative flex items-center gap-1.5 text-slate-500">
+        {icon}
+        <span className="text-[10.5px] font-medium">{label}</span>
+      </div>
+      <div className="relative mt-0.5 text-base font-bold text-slate-900 tabular-nums">{value}</div>
+    </div>
+  );
+};
 
 const StatCard: React.FC<{
   icon: React.ReactNode;
