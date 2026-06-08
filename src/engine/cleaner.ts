@@ -94,19 +94,21 @@ export function bulkReplace(
   column: string,
   find: string,
   replace: string,
-  useRegex = false
+  useRegex = false,
+  ignoreCase = false
 ): CsvFile {
   const targets = column === '__ALL__' ? file.headers : [column];
   return produce(file, (draft) => {
     let regex: RegExp;
+    const flags = 'g' + (ignoreCase ? 'i' : '');
     if (useRegex) {
       try {
-        regex = new RegExp(find, 'g');
+        regex = new RegExp(find, flags);
       } catch {
-        regex = new RegExp(escapeRegExp(find), 'g');
+        regex = new RegExp(escapeRegExp(find), flags);
       }
     } else {
-      regex = new RegExp(escapeRegExp(find), 'g');
+      regex = new RegExp(escapeRegExp(find), flags);
     }
     draft.rows.forEach((row) => {
       targets.forEach((col) => {

@@ -8,6 +8,29 @@ import * as differ from '../engine/differ';
 import * as parser from '../engine/parser';
 import type { FilterCondition } from '../engine/types';
 
+const TEMPLATES_STORAGE_KEY = 'csv-workbench.templates.v1';
+
+function loadTemplatesFromStorage(): WorkflowTemplate[] {
+  try {
+    if (typeof localStorage === 'undefined') return [];
+    const raw = localStorage.getItem(TEMPLATES_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveTemplatesToStorage(templates: WorkflowTemplate[]) {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(TEMPLATES_STORAGE_KEY, JSON.stringify(templates));
+  } catch {
+    /* ignore */
+  }
+}
+
 interface WorkflowState {
   steps: WorkflowStep[];
   templates: WorkflowTemplate[];
@@ -34,7 +57,7 @@ export type WorkflowStore = WorkflowState & WorkflowActions;
 
 export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   steps: [],
-  templates: [],
+  templates: loadTemplatesFromStorage(),
   isPlaying: false,
   currentStepIndex: -1,
 
@@ -63,19 +86,30 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
       createdAt: Date.now(),
       usageCount: 0,
     };
-    set((s) => ({ templates: [...s.templates, tpl] }));
+    set((s) => {
+      const templates = [...s.templates, tpl];
+      saveTemplatesToStorage(templates);
+      return { templates };
+    });
     return tpl;
   },
 
-  deleteTemplate: (id) => set((s) => ({ templates: s.templates.filter((t) => t.id !== id) })),
+  deleteTemplate: (id) =>
+    set((s) => {
+      const templates = s.templates.filter((t) => t.id !== id);
+      saveTemplatesToStorage(templates);
+      return { templates };
+    }),
 
   loadTemplate: (id) => {
     const tpl = get().templates.find((t) => t.id === id);
     if (tpl) {
       set({ steps: [...tpl.steps], currentStepIndex: -1 });
-      set((s) => ({
-        templates: s.templates.map((t) => (t.id === id ? { ...t, usageCount: t.usageCount + 1 } : t)),
-      }));
+      set((s) => {
+        const templates = s.templates.map((t) => (t.id === id ? { ...t, usageCount: t.usageCount + 1 } : t));
+        saveTemplatesToStorage(templates);
+        return { templates };
+      });
     }
   },
 
@@ -100,7 +134,14 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
           return true;
         case 'REPLACE':
           fileStore.updateActiveFile((f) =>
-            cleaner.bulkReplace(f, p.column as string, p.find as string, p.replace as string, p.regex as boolean)
+            cleaner.bulkReplace(
+              f,
+              p.column as string,
+              p.find as string,
+              p.replace as string,
+              (p.regex as boolean) ?? false,
+              (p.ignoreCase as boolean) ?? false
+            )
           );
           return true;
         case 'FILTER':
@@ -110,7 +151,13 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
           return true;
         case 'SPLIT_COLUMN':
           fileStore.updateActiveFile((f) =>
-            transformer.splitColumn(f, p.source as string, p.delimiter as string, p.targets as string[])
+            transformer.splitColumn(
+              f,
+              p.source as string,
+              p.delimiter as string,
+              p.targets as string[],
+              (p.keepOriginal as boolean) ?? false
+            )
           );
           return true;
         case 'MERGE_COLUMNS':
@@ -188,7 +235,11 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
     try {
       const tpl = JSON.parse(json) as WorkflowTemplate;
       if (!tpl.id || !tpl.name || !Array.isArray(tpl.steps)) return null;
-      set((s) => ({ templates: [...s.templates, tpl] }));
+      set((s) => {
+        const templates = [...s.templates, tpl];
+        saveTemplatesToStorage(templates);
+        return { templates };
+      });
       return tpl;
     } catch {
       return null;

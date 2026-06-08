@@ -39,12 +39,15 @@ export const useFileStore = create<FileStore>((set, get) => ({
   selectedColumn: null,
 
   addFile: (file) =>
-    set((s) => ({
-      files: [...s.files, file],
-      activeFileId: s.activeFileId || file.id,
-      snapshots: { ...s.snapshots, [file.id]: [] },
-      selectedRowIds: new Set(),
-    })),
+    set((s) => {
+      const finalized = finalizeTransform(recalcMeta(file));
+      return {
+        files: [...s.files, finalized],
+        activeFileId: s.activeFileId || finalized.id,
+        snapshots: { ...s.snapshots, [finalized.id]: [] },
+        selectedRowIds: new Set(),
+      };
+    }),
 
   removeFile: (id) =>
     set((s) => {
@@ -75,7 +78,8 @@ export const useFileStore = create<FileStore>((set, get) => ({
     set((s) => {
       const file = s.files.find((f) => f.id === id);
       if (!file) return {};
-      const newFile = updater(file);
+      const updatedFile = updater(file);
+      const newFile = finalizeTransform(recalcMeta(updatedFile));
       const newSnapshots = pushSnapshot
         ? { ...s.snapshots, [id]: [...(s.snapshots[id] || []), file] }
         : s.snapshots;

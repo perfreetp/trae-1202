@@ -77,7 +77,7 @@ const ColumnSplitter: React.FC = () => {
               return;
             }
             updateActiveFile((file) => transformer.splitColumn(file, source, delimiter, ts, keepOriginal), true);
-            addStep({ type: 'SPLIT_COLUMN', payload: { source, delimiter, targets: ts }, label: `拆分 ${source} → ${ts.join(',')}` });
+            addStep({ type: 'SPLIT_COLUMN', payload: { source, delimiter, targets: ts, keepOriginal }, label: `拆分 ${source} → ${ts.join(',')}` });
             showToast({ type: 'success', message: '拆分完成' });
           }}
           leftIcon={<Scissors size={14} />}

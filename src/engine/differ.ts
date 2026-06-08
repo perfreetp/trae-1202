@@ -24,22 +24,29 @@ export function compareFiles(leftFile: CsvFile, rightFile: CsvFile, keys: string
 
   const allCols = Array.from(new Set([...leftFile.headers, ...rightFile.headers]));
 
+  const includeLeftOnly = mode === 'left' || mode === 'full';
+  const includeRightOnly = mode === 'right' || mode === 'full';
+
   allKeys.forEach((key) => {
     const l = leftMap.get(key);
     const r = rightMap.get(key);
 
     if (l && !r) {
-      removed.push({
-        ...l,
-        _id: generateId(),
-        _flags: { ...l._flags, diffStatus: 'left-only' },
-      });
+      if (includeLeftOnly) {
+        removed.push({
+          ...l,
+          _id: generateId(),
+          _flags: { ...l._flags, diffStatus: 'left-only' },
+        });
+      }
     } else if (!l && r) {
-      added.push({
-        ...r,
-        _id: generateId(),
-        _flags: { ...r._flags, diffStatus: 'right-only' },
-      });
+      if (includeRightOnly) {
+        added.push({
+          ...r,
+          _id: generateId(),
+          _flags: { ...r._flags, diffStatus: 'right-only' },
+        });
+      }
     } else if (l && r) {
       const changedCols: string[] = [];
       allCols.forEach((col) => {

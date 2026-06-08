@@ -248,10 +248,10 @@ const BulkReplace: React.FC = () => {
             disabled={!find}
             onClick={() => {
               updateActiveFile(
-                (file) => cleaner.bulkReplace(file, column, find, replace, useRegex),
+                (file) => cleaner.bulkReplace(file, column, find, replace, useRegex, !caseSensitive),
                 true
               );
-              addStep({ type: 'REPLACE', payload: { column, find, replace, regex: useRegex }, label: `替换 "${find}" → "${replace}"` });
+              addStep({ type: 'REPLACE', payload: { column, find, replace, regex: useRegex, ignoreCase: !caseSensitive }, label: `替换 "${find}" → "${replace}"` });
               showToast({ type: 'success', message: '批量替换完成' });
             }}
             leftIcon={<Wand2 size={14} />}
