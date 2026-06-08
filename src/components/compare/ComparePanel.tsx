@@ -6,8 +6,11 @@ import {
   compareFiles,
   mergeFiles,
   buildMerge,
+  keyQualityCheck,
   type JoinMode,
   type ConflictStrategy,
+  type KeyQualityIssue,
+  type MergeTrackingOptions,
 } from '../../engine/differ';
 import type { DiffResult } from '../../engine/types';
 import { Button } from '../common/Button';
@@ -30,9 +33,31 @@ import {
   Layers,
   FileOutput,
   ListTree,
+  AlertTriangle,
+  Info,
+  XCircle,
+  ShieldAlert,
+  BadgeCheck,
+  Shapes,
+  Sparkles,
 } from 'lucide-react';
 
-type ViewMode = 'diff' | 'side' | 'merge-preview';
+type ViewMode = 'quality' | 'diff' | 'side' | 'merge-preview';
+
+const ISSUE_ICON: Record<string, React.ReactNode> = {
+  left_null: <XCircle size={14} className="text-rose-500" />,
+  right_null: <XCircle size={14} className="text-rose-500" />,
+  left_duplicate: <AlertTriangle size={14} className="text-amber-500" />,
+  right_duplicate: <AlertTriangle size={14} className="text-amber-500" />,
+  one_to_many: <Shapes size={14} className="text-violet-500" />,
+  many_to_one: <Sparkles size={14} className="text-sky-500" />,
+};
+
+const RISK_BADGE: Record<string, { label: string; variant: any }> = {
+  low: { label: '✅ 低风险', variant: 'success' },
+  medium: { label: '⚠️ 中风险', variant: 'warning' },
+  high: { label: '🚨 高风险', variant: 'danger' },
+};
 
 export const ComparePanel: React.FC = () => {
   const { files, activeFileId, addFile } = useFileStore();
@@ -43,9 +68,14 @@ export const ComparePanel: React.FC = () => {
   const [keys, setKeys] = useState<string[]>([]);
   const [joinMode, setJoinMode] = useState<JoinMode>('full');
   const [conflictStrategy, setConflictStrategy] = useState<ConflictStrategy>('keep_both');
-  const [view, setView] = useState<ViewMode>('diff');
+  const [view, setView] = useState<ViewMode>('quality');
   const [leftSuffix, setLeftSuffix] = useState('_左表');
   const [rightSuffix, setRightSuffix] = useState('_右表');
+
+  // 来源追踪选项
+  const [trackStatus, setTrackStatus] = useState(true);
+  const [trackLeftRow, setTrackLeftRow] = useState(true);
+  const [trackRightRow, setTrackRightRow] = useState(true);
 
   const leftFile = files.find((f) => f.id === activeFileId);
   const rightFile = files.find((f) => f.id === compareFileId);
@@ -59,6 +89,15 @@ export const ComparePanel: React.FC = () => {
     }
   }, [leftFile, rightFile, keys.join('|'), joinMode]);
 
+  const tracking: MergeTrackingOptions = useMemo(
+    () => ({
+      addStatusColumn: trackStatus,
+      addLeftRowIndex: trackLeftRow,
+      addRightRowIndex: trackRightRow,
+    }),
+    [trackStatus, trackLeftRow, trackRightRow]
+  );
+
   const mergePreview = useMemo(() => {
     if (!leftFile || !rightFile || keys.length === 0) return null;
     try {
@@ -66,11 +105,21 @@ export const ComparePanel: React.FC = () => {
         mode: joinMode,
         suffixes: { left: leftSuffix, right: rightSuffix },
         conflictStrategy,
+        ...tracking,
       });
     } catch {
       return null;
     }
-  }, [leftFile, rightFile, keys.join('|'), joinMode, conflictStrategy, leftSuffix, rightSuffix]);
+  }, [leftFile, rightFile, keys.join('|'), joinMode, conflictStrategy, leftSuffix, rightSuffix, trackStatus, trackLeftRow, trackRightRow]);
+
+  const qualityReport = useMemo(() => {
+    if (!leftFile || !rightFile || keys.length === 0) return null;
+    try {
+      return keyQualityCheck(leftFile, rightFile, keys);
+    } catch {
+      return null;
+    }
+  }, [leftFile, rightFile, keys.join('|')]);
 
   if (files.length < 2) {
     return (
@@ -92,6 +141,7 @@ export const ComparePanel: React.FC = () => {
 
   const allHeaders = Array.from(new Set([...(leftFile?.headers ?? []), ...(rightFile?.headers ?? [])]));
   const strategyDisabled = conflictStrategy !== 'keep_both';
+  const risk = qualityReport ? RISK_BADGE[qualityReport.overallRisk] : RISK_BADGE.low;
 
   return (
     <div className="space-y-4">
@@ -178,6 +228,7 @@ export const ComparePanel: React.FC = () => {
             onChange={(v) => setView(v as ViewMode)}
             className="md:col-span-2"
             options={[
+              { label: '键质量检查', value: 'quality' },
               { label: '差异统计', value: 'diff' },
               { label: '合并预览', value: 'merge-preview' },
               { label: '双表并排', value: 'side' },
@@ -186,16 +237,31 @@ export const ComparePanel: React.FC = () => {
           <div className="md:col-span-3">
             <Button
               variant="primary"
-              disabled={keys.length === 0 || !rightFile || !mergePreview}
+              disabled={keys.length === 0 || !rightFile || !mergePreview || qualityReport?.hasCriticalIssue}
               leftIcon={<GitMerge size={14} />}
               className="w-full"
               onClick={() => {
                 if (!leftFile || !rightFile) return;
-                const { file } = mergeFiles(leftFile, rightFile, keys, joinMode, { left: leftSuffix, right: rightSuffix }, conflictStrategy);
+                const { file } = mergeFiles(
+                  leftFile,
+                  rightFile,
+                  keys,
+                  joinMode,
+                  { left: leftSuffix, right: rightSuffix },
+                  conflictStrategy,
+                  tracking
+                );
                 addFile(file);
                 addStep({
                   type: 'COMPARE',
-                  payload: { otherFileId: rightFile.id, keys, mode: joinMode, conflictStrategy, suffixes: { left: leftSuffix, right: rightSuffix } },
+                  payload: {
+                    otherFileId: rightFile.id,
+                    keys,
+                    mode: joinMode,
+                    conflictStrategy,
+                    suffixes: { left: leftSuffix, right: rightSuffix },
+                    tracking,
+                  },
                   label: `合并 ${leftFile.name} ⇄ ${rightFile.name}（${joinMode}）`,
                 });
                 showToast({ type: 'success', message: `已生成合并结果：${file.name}（${formatNumber(file.rowCount)} 行）` });
@@ -203,17 +269,71 @@ export const ComparePanel: React.FC = () => {
             >
               生成合并表
             </Button>
+            {qualityReport?.hasCriticalIssue && (
+              <div className="text-[10.5px] text-rose-500 mt-1">
+                ⚠️ 检测到严重质量问题，已禁用生成；请先修复关联键
+              </div>
+            )}
           </div>
         </div>
 
-        {view === 'side' && (
-          <div className="grid grid-cols-2 gap-3">
-            <Input label="冲突列后缀（左表）" value={leftSuffix} onChange={setLeftSuffix} placeholder="_A / _左 ..." disabled={strategyDisabled} />
-            <Input label="冲突列后缀（右表）" value={rightSuffix} onChange={setRightSuffix} placeholder="_B / _右 ..." disabled={strategyDisabled} />
+        {(view === 'merge-preview' || view === 'side' || true) && (
+          <div className="pt-1 border-t border-slate-100 space-y-2">
+            <div className="text-[11px] font-semibold text-slate-700 flex items-center gap-1.5">
+              <BadgeCheck size={12} /> 来源追踪列（加到合并表的最前面，方便后续按来源筛选/定位）
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <Checkbox checked={trackStatus} onChange={setTrackStatus} label="匹配状态列（_匹配状态：不变/修改/左独有/右独有）" />
+              <Checkbox checked={trackLeftRow} onChange={setTrackLeftRow} label="左表原行号列（_左表原行号）" />
+              <Checkbox checked={trackRightRow} onChange={setTrackRightRow} label="右表原行号列（_右表原行号）" />
+            </div>
+            <div className="grid grid-cols-2 gap-3 pt-1">
+              <Input label="冲突列后缀（左表）" value={leftSuffix} onChange={setLeftSuffix} placeholder="_左表" disabled={strategyDisabled} />
+              <Input label="冲突列后缀（右表）" value={rightSuffix} onChange={setRightSuffix} placeholder="_右表" disabled={strategyDisabled} />
+            </div>
           </div>
         )}
       </div>
 
+      {/* 1. 键质量检查 */}
+      {view === 'quality' && qualityReport && (
+        <div className="rounded-xl border border-slate-200 bg-white overflow-hidden space-y-3 p-4">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <ShieldAlert size={16} /> 关联键质量检查
+            </div>
+            <Badge variant={risk.variant} size="sm">
+              {risk.label}
+            </Badge>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-7 gap-2.5">
+            <MiniStat icon={<Layers size={12} />} label="左表总行" value={formatNumber(qualityReport.leftRows)} color="teal" />
+            <MiniStat icon={<Layers size={12} />} label="右表总行" value={formatNumber(qualityReport.rightRows)} color="sky" />
+            <MiniStat icon={<Hash size={12} />} label="左唯一键" value={formatNumber(qualityReport.leftUniqueKeys)} color="emerald" />
+            <MiniStat icon={<Hash size={12} />} label="右唯一键" value={formatNumber(qualityReport.rightUniqueKeys)} color="emerald" />
+            <MiniStat icon={<ArrowLeftRight size={12} />} label="两边共有" value={formatNumber(qualityReport.keysExistInBoth)} color="indigo" />
+            <MiniStat icon={<CircleMinus size={12} />} label="仅左表有" value={formatNumber(qualityReport.keysOnlyLeft)} color="rose" />
+            <MiniStat icon={<CirclePlus size={12} />} label="仅右表有" value={formatNumber(qualityReport.keysOnlyRight)} color="amber" />
+          </div>
+
+          {qualityReport.issues.length === 0 ? (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-6 text-center">
+              <BadgeCheck size={28} className="text-emerald-600 mx-auto mb-2" />
+              <div className="text-sm font-semibold text-emerald-800">🎉 关联键质量极佳</div>
+              <div className="text-xs text-emerald-600 mt-1">无重复键、无空键、匹配关系均匀</div>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {qualityReport.issues.map((issue, i) => (
+                <QualityIssueCard key={i} issue={issue} keys={keys} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 2. 合并预览 */}
       {mergePreview && (
         <div className="rounded-xl border border-indigo-200 bg-gradient-to-br from-indigo-50/60 to-violet-50/40 p-4 space-y-3">
           <div className="flex items-center gap-2 text-sm font-semibold text-indigo-900">
@@ -224,47 +344,22 @@ export const ComparePanel: React.FC = () => {
             <Badge size="sm" variant="default" className="ml-1">
               冲突策略：{conflictStrategy}
             </Badge>
+            {(trackStatus || trackLeftRow || trackRightRow) && (
+              <Badge size="sm" variant="success" className="ml-1">
+                含追踪列
+              </Badge>
+            )}
           </div>
           <div className="grid grid-cols-2 md:grid-cols-6 gap-2.5">
-            <MiniStat
-              icon={<FileOutput size={13} />}
-              label="输出总行数"
-              value={formatNumber(mergePreview.summary.totalRows)}
-              color="indigo"
-            />
-            <MiniStat
-              icon={<Layers size={13} />}
-              label="双表共同匹配"
-              value={formatNumber(mergePreview.summary.bothMatched)}
-              color="emerald"
-            />
-            <MiniStat
-              icon={<CircleCheck size={13} />}
-              label="左表匹配数"
-              value={formatNumber(mergePreview.summary.leftMatched)}
-              color="teal"
-            />
-            <MiniStat
-              icon={<CircleCheck size={13} />}
-              label="右表匹配数"
-              value={formatNumber(mergePreview.summary.rightMatched)}
-              color="sky"
-            />
-            <MiniStat
-              icon={<CircleMinus size={13} />}
-              label="左表未匹配"
-              value={formatNumber(mergePreview.summary.unmatchedLeft)}
-              color="rose"
-            />
-            <MiniStat
-              icon={<CirclePlus size={13} />}
-              label="右表未匹配"
-              value={formatNumber(mergePreview.summary.unmatchedRight)}
-              color="amber"
-            />
+            <MiniStat icon={<FileOutput size={13} />} label="输出总行数" value={formatNumber(mergePreview.summary.totalRows)} color="indigo" />
+            <MiniStat icon={<Layers size={13} />} label="双表共同匹配" value={formatNumber(mergePreview.summary.bothMatched)} color="emerald" />
+            <MiniStat icon={<CircleCheck size={13} />} label="左表匹配数" value={formatNumber(mergePreview.summary.leftMatched)} color="teal" />
+            <MiniStat icon={<CircleCheck size={13} />} label="右表匹配数" value={formatNumber(mergePreview.summary.rightMatched)} color="sky" />
+            <MiniStat icon={<CircleMinus size={13} />} label="左表未匹配" value={formatNumber(mergePreview.summary.unmatchedLeft)} color="rose" />
+            <MiniStat icon={<CirclePlus size={13} />} label="右表未匹配" value={formatNumber(mergePreview.summary.unmatchedRight)} color="amber" />
           </div>
           <div className="rounded-lg border border-indigo-200 bg-white overflow-hidden">
-            <div className="px-3 py-2 bg-indigo-50/70 border-b border-indigo-200 flex items-center justify-between">
+            <div className="px-3 py-2 bg-indigo-50/70 border-b border-indigo-200 flex items-center justify-between flex-wrap gap-2">
               <div className="text-xs font-semibold text-indigo-900 flex items-center gap-1.5">
                 <ListTree size={13} /> 合并结果预览（前 30 行，共 {formatNumber(mergePreview.headers.length)} 列）
               </div>
@@ -277,19 +372,19 @@ export const ComparePanel: React.FC = () => {
                 <thead className="bg-slate-100 sticky top-0 z-10">
                   <tr>
                     <th className="px-2 py-1.5 text-left w-8 border-r border-slate-200">#</th>
-                    <th className="px-2 py-1.5 text-left w-14 border-r border-slate-200">状态</th>
+                    <th className="px-2 py-1.5 text-left w-16 border-r border-slate-200">状态</th>
                     {mergePreview.headers.map((h) => (
                       <th
                         key={h}
                         className={cn(
                           'px-2 py-1.5 text-left border-r border-slate-200 whitespace-nowrap font-medium text-slate-700',
-                          mergePreview.conflictingCols.includes(h) && 'bg-amber-50 text-amber-800'
+                          mergePreview.conflictingCols.includes(h) && 'bg-amber-50 text-amber-800',
+                          h.startsWith('_') && 'bg-sky-50 text-sky-800'
                         )}
                       >
                         {h}
-                        {mergePreview.conflictingCols.includes(h) && (
-                          <span className="ml-1 text-[9px] text-amber-600">[冲突]</span>
-                        )}
+                        {mergePreview.conflictingCols.includes(h) && <span className="ml-1 text-[9px] text-amber-600">[冲突]</span>}
+                        {h.startsWith('_') && <span className="ml-1 text-[9px] text-sky-600">[追踪]</span>}
                       </th>
                     ))}
                   </tr>
@@ -320,10 +415,7 @@ export const ComparePanel: React.FC = () => {
                   })}
                   {mergePreview.rows.length === 0 && (
                     <tr>
-                      <td
-                        colSpan={mergePreview.headers.length + 2}
-                        className="px-4 py-8 text-center text-xs text-slate-400"
-                      >
+                      <td colSpan={mergePreview.headers.length + 2} className="px-4 py-8 text-center text-xs text-slate-400">
                         当前连接模式下无输出行
                       </td>
                     </tr>
@@ -335,60 +427,20 @@ export const ComparePanel: React.FC = () => {
         </div>
       )}
 
+      {/* 3. 差异统计 */}
       {diff && view === 'diff' && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-            <StatCard
-              icon={<CircleCheck size={16} className="text-emerald-600" />}
-              label="完全匹配"
-              value={formatNumber(diff.stats.bothSame)}
-              color="emerald"
-            />
-            <StatCard
-              icon={<CircleMinus size={16} className="text-rose-600" />}
-              label="仅左表有"
-              value={formatNumber(diff.stats.leftOnly)}
-              color="rose"
-            />
-            <StatCard
-              icon={<CirclePlus size={16} className="text-sky-600" />}
-              label="仅右表有"
-              value={formatNumber(diff.stats.rightOnly)}
-              color="sky"
-            />
-            <StatCard
-              icon={<AlertCircle size={16} className="text-amber-600" />}
-              label="值有差异"
-              value={formatNumber(diff.stats.bothChanged)}
-              color="amber"
-            />
-            <StatCard
-              icon={<GitCompare size={16} className="text-violet-600" />}
-              label="总差异行"
-              value={formatNumber(diff.stats.totalDiff)}
-              color="violet"
-            />
+            <StatCard icon={<CircleCheck size={16} className="text-emerald-600" />} label="完全匹配" value={formatNumber(diff.stats.bothSame)} color="emerald" />
+            <StatCard icon={<CircleMinus size={16} className="text-rose-600" />} label="仅左表有" value={formatNumber(diff.stats.leftOnly)} color="rose" />
+            <StatCard icon={<CirclePlus size={16} className="text-sky-600" />} label="仅右表有" value={formatNumber(diff.stats.rightOnly)} color="sky" />
+            <StatCard icon={<AlertCircle size={16} className="text-amber-600" />} label="值有差异" value={formatNumber(diff.stats.bothChanged)} color="amber" />
+            <StatCard icon={<GitCompare size={16} className="text-violet-600" />} label="总差异行" value={formatNumber(diff.stats.totalDiff)} color="violet" />
           </div>
 
           <div className="space-y-3">
-            <DiffSection
-              title="仅在左表存在的行（右表缺失）"
-              rows={diff.removed.slice(0, 50)}
-              headers={leftFile.headers}
-              rowClass="bg-rose-50 hover:bg-rose-100"
-              badge="左表独有"
-              badgeVariant="danger"
-              emptyText="✅ 左表中所有行在右表均有匹配"
-            />
-            <DiffSection
-              title="仅在右表存在的行（左表缺失）"
-              rows={diff.added.slice(0, 50)}
-              headers={rightFile.headers}
-              rowClass="bg-emerald-50 hover:bg-emerald-100"
-              badge="右表新增"
-              badgeVariant="success"
-              emptyText="✅ 右表中没有额外的新行"
-            />
+            <DiffSection title="仅在左表存在的行（右表缺失）" rows={diff.removed.slice(0, 50)} headers={leftFile.headers} rowClass="bg-rose-50 hover:bg-rose-100" badge="左表独有" badgeVariant="danger" emptyText="✅ 左表中所有行在右表均有匹配" />
+            <DiffSection title="仅在右表存在的行（左表缺失）" rows={diff.added.slice(0, 50)} headers={rightFile.headers} rowClass="bg-emerald-50 hover:bg-emerald-100" badge="右表新增" badgeVariant="success" emptyText="✅ 右表中没有额外的新行" />
             {diff.modified.length > 0 && (
               <div className="rounded-xl border border-amber-200 bg-amber-50/30 overflow-hidden">
                 <div className="px-4 py-2.5 border-b border-amber-200 bg-amber-50/60 flex items-center justify-between">
@@ -413,40 +465,18 @@ export const ComparePanel: React.FC = () => {
                     <tbody>
                       {diff.modified.slice(0, 30).flatMap((m, i) => [
                         <tr key={`l-${i}`} className="border-b border-amber-100">
-                          <td className="px-2 py-1 border-r border-amber-100 text-slate-400" rowSpan={2}>
-                            {i + 1}
-                          </td>
-                          <td className="px-2 py-1 border-r border-amber-100">
-                            <Badge size="sm" variant="danger">
-                              左
-                            </Badge>
-                          </td>
+                          <td className="px-2 py-1 border-r border-amber-100 text-slate-400" rowSpan={2}>{i + 1}</td>
+                          <td className="px-2 py-1 border-r border-amber-100"><Badge size="sm" variant="danger">左</Badge></td>
                           {allHeaders.map((h) => (
-                            <td
-                              key={h}
-                              className={cn(
-                                'px-2 py-1 border-r border-amber-100 whitespace-nowrap',
-                                m.changedColumns.includes(h) && 'bg-rose-100/80 text-rose-900 font-semibold'
-                              )}
-                            >
+                            <td key={h} className={cn('px-2 py-1 border-r border-amber-100 whitespace-nowrap', m.changedColumns.includes(h) && 'bg-rose-100/80 text-rose-900 font-semibold')}>
                               {fmt(m.left.values[h])}
                             </td>
                           ))}
                         </tr>,
                         <tr key={`r-${i}`} className="border-b-2 border-amber-200">
-                          <td className="px-2 py-1 border-r border-amber-100">
-                            <Badge size="sm" variant="success">
-                              右
-                            </Badge>
-                          </td>
+                          <td className="px-2 py-1 border-r border-amber-100"><Badge size="sm" variant="success">右</Badge></td>
                           {allHeaders.map((h) => (
-                            <td
-                              key={h}
-                              className={cn(
-                                'px-2 py-1 border-r border-amber-100 whitespace-nowrap',
-                                m.changedColumns.includes(h) && 'bg-emerald-100/80 text-emerald-900 font-semibold'
-                              )}
-                            >
+                            <td key={h} className={cn('px-2 py-1 border-r border-amber-100 whitespace-nowrap', m.changedColumns.includes(h) && 'bg-emerald-100/80 text-emerald-900 font-semibold')}>
                               {fmt(m.right.values[h])}
                             </td>
                           ))}
@@ -454,10 +484,6 @@ export const ComparePanel: React.FC = () => {
                       ])}
                     </tbody>
                   </table>
-                </div>
-                <div className="px-4 py-2 border-t border-amber-200 bg-amber-50/50 flex items-center gap-4 text-[11px] text-amber-800">
-                  <Legend color="bg-rose-200" label="左表的值 (变更列)" />
-                  <Legend color="bg-emerald-200" label="右表的值 (变更列)" />
                 </div>
               </div>
             )}
@@ -473,30 +499,61 @@ const fmt = (v: unknown): string => {
   return typeof v === 'number' ? formatNumber(v) : String(v);
 };
 
-const Legend: React.FC<{ color: string; label: string }> = ({ color, label }) => (
-  <div className="inline-flex items-center gap-1.5">
-    <span className={`w-3 h-3 rounded ${color} border border-slate-300`} />
-    <span>{label}</span>
-  </div>
-);
+const QualityIssueCard: React.FC<{ issue: KeyQualityIssue; keys: string[] }> = ({ issue, keys }) => {
+  const [open, setOpen] = useState(true);
+  const bgMap: Record<string, string> = { error: 'border-rose-200 bg-rose-50/40', warning: 'border-amber-200 bg-amber-50/40', info: 'border-sky-200 bg-sky-50/40' };
+  const titleMap: Record<string, string> = { error: '严重错误', warning: '警告', info: '提示' };
+  const variantMap: Record<string, any> = { error: 'danger', warning: 'warning', info: 'info' };
+  return (
+    <div className={cn('rounded-lg border overflow-hidden', bgMap[issue.severity])}>
+      <button className="w-full px-3 py-2 flex items-center justify-between gap-2 text-left" onClick={() => setOpen(!open)}>
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="shrink-0">{ISSUE_ICON[issue.type]}</div>
+          <div className="text-xs font-semibold text-slate-800 truncate">{issue.message}</div>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <Badge size="sm" variant={variantMap[issue.severity]}>{titleMap[issue.severity]}</Badge>
+          <Badge size="sm" variant="default">{formatNumber(issue.count)}</Badge>
+          <span className={cn('text-slate-400 transition-transform text-xs', open && 'rotate-180')}>▼</span>
+        </div>
+      </button>
+      {open && (
+        <div className="border-t border-white/60 max-h-60 overflow-auto bg-white">
+          <table className="w-full text-[11px]">
+            <thead className="bg-slate-100 sticky top-0 z-10">
+              <tr>
+                <th className="px-2 py-1 text-left w-8">#</th>
+                {keys.map((k) => (
+                  <th key={k} className="px-2 py-1 text-left whitespace-nowrap border-r border-slate-200">{k}</th>
+                ))}
+                <th className="px-2 py-1 text-left whitespace-nowrap w-24">行号</th>
+                {issue.sampleRows.some((s) => s.extra) && <th className="px-2 py-1 text-left whitespace-nowrap">备注</th>}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {issue.sampleRows.map((r, i) => (
+                <tr key={i}>
+                  <td className="px-2 py-1 text-slate-400 tabular-nums">{i + 1}</td>
+                  {keys.map((k) => (
+                    <td key={k} className="px-2 py-1 whitespace-nowrap border-r border-slate-100">{fmt(r.values?.[k])}</td>
+                  ))}
+                  <td className="px-2 py-1 whitespace-nowrap text-slate-600 tabular-nums">{r.rowIndex !== undefined ? r.rowIndex + 1 : '-'}</td>
+                  {issue.sampleRows.some((s) => s.extra) && <td className="px-2 py-1 whitespace-nowrap text-slate-500">{r.extra ?? '-'}</td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
 
-const MiniStat: React.FC<{
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  color: 'indigo' | 'emerald' | 'teal' | 'sky' | 'rose' | 'amber';
-}> = ({ icon, label, value, color }) => {
-  const map: Record<string, string> = {
-    indigo: 'from-indigo-500 to-indigo-600',
-    emerald: 'from-emerald-500 to-emerald-600',
-    teal: 'from-teal-500 to-teal-600',
-    sky: 'from-sky-500 to-sky-600',
-    rose: 'from-rose-500 to-rose-600',
-    amber: 'from-amber-500 to-amber-600',
-  };
+const MiniStat: React.FC<{ icon: React.ReactNode; label: string; value: string; color: string }> = ({ icon, label, value, color }) => {
+  const map: Record<string, string> = { indigo: 'from-indigo-500 to-indigo-600', emerald: 'from-emerald-500 to-emerald-600', teal: 'from-teal-500 to-teal-600', sky: 'from-sky-500 to-sky-600', rose: 'from-rose-500 to-rose-600', amber: 'from-amber-500 to-amber-600', violet: 'from-violet-500 to-violet-600' };
   return (
     <div className="relative rounded-lg border border-white bg-white/80 p-2.5 overflow-hidden shadow-sm">
-      <div className={`absolute -top-8 -right-8 w-16 h-16 rounded-full bg-gradient-to-br ${map[color]} opacity-10`} />
+      <div className={cn('absolute -top-8 -right-8 w-16 h-16 rounded-full bg-gradient-to-br opacity-10', map[color])} />
       <div className="relative flex items-center gap-1.5 text-slate-500">
         {icon}
         <span className="text-[10.5px] font-medium">{label}</span>
@@ -506,22 +563,11 @@ const MiniStat: React.FC<{
   );
 };
 
-const StatCard: React.FC<{
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  color: 'emerald' | 'rose' | 'sky' | 'amber' | 'violet';
-}> = ({ icon, label, value, color }) => {
-  const colorMap: Record<string, string> = {
-    emerald: 'from-emerald-500 to-emerald-600',
-    rose: 'from-rose-500 to-rose-600',
-    sky: 'from-sky-500 to-sky-600',
-    amber: 'from-amber-500 to-amber-600',
-    violet: 'from-violet-500 to-violet-600',
-  };
+const StatCard: React.FC<{ icon: React.ReactNode; label: string; value: string; color: string }> = ({ icon, label, value, color }) => {
+  const colorMap: Record<string, string> = { emerald: 'from-emerald-500 to-emerald-600', rose: 'from-rose-500 to-rose-600', sky: 'from-sky-500 to-sky-600', amber: 'from-amber-500 to-amber-600', violet: 'from-violet-500 to-violet-600' };
   return (
     <div className="relative rounded-xl border border-slate-200 bg-white p-3 overflow-hidden">
-      <div className={`absolute -top-10 -right-10 w-24 h-24 rounded-full bg-gradient-to-br ${colorMap[color]} opacity-10`} />
+      <div className={cn('absolute -top-10 -right-10 w-24 h-24 rounded-full bg-gradient-to-br opacity-10', colorMap[color])} />
       <div className="relative">
         <div className="flex items-center gap-1.5">{icon}</div>
         <div className="mt-0.5 text-[11px] text-slate-500 font-medium">{label}</div>
@@ -531,20 +577,10 @@ const StatCard: React.FC<{
   );
 };
 
-const DiffSection: React.FC<{
-  title: string;
-  rows: any[];
-  headers: string[];
-  rowClass: string;
-  badge: string;
-  badgeVariant: any;
-  emptyText: string;
-}> = ({ title, rows, headers, rowClass, badge, badgeVariant, emptyText }) => (
+const DiffSection: React.FC<{ title: string; rows: any[]; headers: string[]; rowClass: string; badge: string; badgeVariant: any; emptyText: string }> = ({ title, rows, headers, rowClass, badge, badgeVariant, emptyText }) => (
   <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
     <div className="px-4 py-2.5 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
-      <div className="text-sm font-semibold text-slate-800">
-        {title} {rows.length > 0 && <span className="text-slate-400 text-xs ml-1">(仅前 50 行)</span>}
-      </div>
+      <div className="text-sm font-semibold text-slate-800">{title} {rows.length > 0 && <span className="text-slate-400 text-xs ml-1">(仅前 50 行)</span>}</div>
       <Badge variant={badgeVariant}>{badge} · {formatNumber(rows.length)}</Badge>
     </div>
     {rows.length === 0 ? (
@@ -556,9 +592,7 @@ const DiffSection: React.FC<{
             <tr>
               <th className="px-2 py-1.5 text-left w-8">#</th>
               {headers.map((h) => (
-                <th key={h} className="px-2 py-1.5 text-left border-r border-slate-200 whitespace-nowrap font-medium text-slate-700">
-                  {h}
-                </th>
+                <th key={h} className="px-2 py-1.5 text-left border-r border-slate-200 whitespace-nowrap font-medium text-slate-700">{h}</th>
               ))}
             </tr>
           </thead>
@@ -567,9 +601,7 @@ const DiffSection: React.FC<{
               <tr key={i} className={rowClass}>
                 <td className="px-2 py-1 text-slate-400 tabular-nums">{i + 1}</td>
                 {headers.map((h) => (
-                  <td key={h} className="px-2 py-1 border-r border-slate-100 whitespace-nowrap">
-                    {fmt(r.values[h])}
-                  </td>
+                  <td key={h} className="px-2 py-1 border-r border-slate-100 whitespace-nowrap">{fmt(r.values[h])}</td>
                 ))}
               </tr>
             ))}

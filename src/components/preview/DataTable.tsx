@@ -16,6 +16,16 @@ const typeIcons: Record<string, LucideIcon> = {
   mixed: Shuffle,
 };
 
+type DiffStatusFilter = 'all' | 'unchanged' | 'modified' | 'left-only' | 'right-only';
+
+const DIFF_STATUS_OPTIONS: Array<{ value: DiffStatusFilter; label: string; variant: any; badgeCls: string }> = [
+  { value: 'all', label: '全部', variant: 'default', badgeCls: 'bg-slate-50 text-slate-700 hover:bg-slate-200' },
+  { value: 'unchanged', label: '双表匹配(不变)', variant: 'success', badgeCls: 'bg-emerald-50 text-emerald-800 hover:bg-emerald-200' },
+  { value: 'modified', label: '双表匹配(修改)', variant: 'warning', badgeCls: 'bg-amber-50 text-amber-800 hover:bg-amber-200' },
+  { value: 'left-only', label: '仅在左表', variant: 'danger', badgeCls: 'bg-rose-50 text-rose-800 hover:bg-rose-200' },
+  { value: 'right-only', label: '仅在右表', variant: 'info', badgeCls: 'bg-sky-50 text-sky-800 hover:bg-sky-200' },
+];
+
 export const ColumnTypeBadge: React.FC<{ column: ColumnInfo }> = ({ column }) => {
   const Icon = typeIcons[column.type] || FileText;
   const typeLabels: Record<string, string> = {
@@ -105,12 +115,22 @@ export const DataTable: React.FC = () => {
   const [page, setPage] = useState(0);
   const [sampleSize, setSampleSize] = useState<50 | 100 | 500 | 'all'>(100);
   const [sort, setSort] = useState<SortState>({ column: null, dir: null });
+  const [activeDiffStatus, setActiveDiffStatus] = useState<DiffStatusFilter>('all');
 
   const PAGE_SIZE = 50;
+
+  const hasDiffColumn = useMemo(() => {
+    if (!f) return false;
+    if (f.headers.some((h) => h === '_匹配状态')) return true;
+    return f.rows.some((r) => !!r._flags?.diffStatus);
+  }, [f]);
 
   const filteredRows = useMemo(() => {
     if (!f) return [];
     let rows = f.rows;
+    if (activeDiffStatus !== 'all') {
+      rows = rows.filter((r) => r._flags?.diffStatus === activeDiffStatus);
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       rows = rows.filter((r) =>
@@ -135,7 +155,7 @@ export const DataTable: React.FC = () => {
     }
     if (sampleSize !== 'all') rows = rows.slice(0, sampleSize);
     return rows;
-  }, [f, search, sort, sampleSize]);
+  }, [f, activeDiffStatus, search, sort, sampleSize]);
 
   if (!f) {
     return (
@@ -190,8 +210,35 @@ export const DataTable: React.FC = () => {
         <div className="text-xs text-slate-500">
           显示 {formatNumber(displayRows.length)} / {formatNumber(filteredRows.length)} 行
           {search && ` (搜索结果)`}
+          {activeDiffStatus !== 'all' && ` (来源筛选)`}
         </div>
       </div>
+
+      {hasDiffColumn && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-slate-500 mr-1">来源状态：</span>
+          {DIFF_STATUS_OPTIONS.map((opt) => {
+            const active = activeDiffStatus === opt.value;
+            return (
+              <button
+                key={opt.value}
+                onClick={() => {
+                  setActiveDiffStatus(opt.value);
+                  setPage(0);
+                }}
+                className={cn(
+                  'px-2.5 py-1.5 text-xs rounded-lg border font-medium transition-all',
+                  active
+                    ? `${opt.badgeCls} border-current shadow-sm`
+                    : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300 hover:text-slate-700'
+                )}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       <div className="rounded-xl border border-slate-200 overflow-hidden bg-white shadow-sm">
         <div className="overflow-auto max-h-[520px]">
