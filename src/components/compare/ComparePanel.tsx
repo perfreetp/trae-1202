@@ -51,6 +51,10 @@ const ISSUE_ICON: Record<string, React.ReactNode> = {
   right_duplicate: <AlertTriangle size={14} className="text-amber-500" />,
   one_to_many: <Shapes size={14} className="text-violet-500" />,
   many_to_one: <Sparkles size={14} className="text-sky-500" />,
+  only_left: <CircleMinus size={14} className="text-rose-500" />,
+  only_right: <CirclePlus size={14} className="text-amber-500" />,
+  missing_key_left: <ShieldAlert size={14} className="text-rose-600" />,
+  missing_key_right: <ShieldAlert size={14} className="text-rose-600" />,
 };
 
 const RISK_BADGE: Record<string, { label: string; variant: any }> = {
@@ -504,6 +508,10 @@ const QualityIssueCard: React.FC<{ issue: KeyQualityIssue; keys: string[] }> = (
   const bgMap: Record<string, string> = { error: 'border-rose-200 bg-rose-50/40', warning: 'border-amber-200 bg-amber-50/40', info: 'border-sky-200 bg-sky-50/40' };
   const titleMap: Record<string, string> = { error: '严重错误', warning: '警告', info: '提示' };
   const variantMap: Record<string, any> = { error: 'danger', warning: 'warning', info: 'info' };
+  const isMissingKeyType = issue.type === 'missing_key_left' || issue.type === 'missing_key_right';
+  const displayKeys = isMissingKeyType ? ['缺失列'] : keys;
+  const showRowNumber = !isMissingKeyType;
+  const showExtra = issue.sampleRows.some((s) => s.extra);
   return (
     <div className={cn('rounded-lg border overflow-hidden', bgMap[issue.severity])}>
       <button className="w-full px-3 py-2 flex items-center justify-between gap-2 text-left" onClick={() => setOpen(!open)}>
@@ -517,28 +525,30 @@ const QualityIssueCard: React.FC<{ issue: KeyQualityIssue; keys: string[] }> = (
           <span className={cn('text-slate-400 transition-transform text-xs', open && 'rotate-180')}>▼</span>
         </div>
       </button>
-      {open && (
+      {open && issue.sampleRows.length > 0 && (
         <div className="border-t border-white/60 max-h-60 overflow-auto bg-white">
           <table className="w-full text-[11px]">
             <thead className="bg-slate-100 sticky top-0 z-10">
               <tr>
                 <th className="px-2 py-1 text-left w-8">#</th>
-                {keys.map((k) => (
+                {displayKeys.map((k) => (
                   <th key={k} className="px-2 py-1 text-left whitespace-nowrap border-r border-slate-200">{k}</th>
                 ))}
-                <th className="px-2 py-1 text-left whitespace-nowrap w-24">行号</th>
-                {issue.sampleRows.some((s) => s.extra) && <th className="px-2 py-1 text-left whitespace-nowrap">备注</th>}
+                {showRowNumber && <th className="px-2 py-1 text-left whitespace-nowrap w-24">行号</th>}
+                {showExtra && <th className="px-2 py-1 text-left whitespace-nowrap">备注</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {issue.sampleRows.map((r, i) => (
                 <tr key={i}>
                   <td className="px-2 py-1 text-slate-400 tabular-nums">{i + 1}</td>
-                  {keys.map((k) => (
+                  {displayKeys.map((k) => (
                     <td key={k} className="px-2 py-1 whitespace-nowrap border-r border-slate-100">{fmt(r.values?.[k])}</td>
                   ))}
-                  <td className="px-2 py-1 whitespace-nowrap text-slate-600 tabular-nums">{r.rowIndex !== undefined ? r.rowIndex + 1 : '-'}</td>
-                  {issue.sampleRows.some((s) => s.extra) && <td className="px-2 py-1 whitespace-nowrap text-slate-500">{r.extra ?? '-'}</td>}
+                  {showRowNumber && (
+                    <td className="px-2 py-1 whitespace-nowrap text-slate-600 tabular-nums">{r.rowIndex !== undefined ? r.rowIndex + 1 : '-'}</td>
+                  )}
+                  {showExtra && <td className="px-2 py-1 whitespace-nowrap text-slate-500">{r.extra ?? '-'}</td>}
                 </tr>
               ))}
             </tbody>

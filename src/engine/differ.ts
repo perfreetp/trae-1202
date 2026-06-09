@@ -21,8 +21,20 @@ export interface MergeOptions extends MergeTrackingOptions {
   conflictStrategy?: ConflictStrategy;
 }
 
+export type KeyQualityIssueType =
+  | 'left_duplicate'
+  | 'right_duplicate'
+  | 'left_null'
+  | 'right_null'
+  | 'one_to_many'
+  | 'many_to_one'
+  | 'only_left'
+  | 'only_right'
+  | 'missing_key_left'
+  | 'missing_key_right';
+
 export interface KeyQualityIssue {
-  type: 'left_duplicate' | 'right_duplicate' | 'left_null' | 'right_null' | 'one_to_many' | 'many_to_one';
+  type: KeyQualityIssueType;
   count: number;
   severity: 'warning' | 'error' | 'info';
   sampleRows: Array<{ key: string; rowIndex?: number; rowId?: string; values?: Record<string, string | number | null>; extra?: string }>;
@@ -77,6 +89,9 @@ export interface BuildMergeResult {
 }
 
 export function keyQualityCheck(leftFile: CsvFile, rightFile: CsvFile, keys: string[]): KeyQualityReport {
+  const leftMissingKeys = keys.filter((k) => !leftFile.headers.includes(k));
+  const rightMissingKeys = keys.filter((k) => !rightFile.headers.includes(k));
+
   const buildKey = (row: DataRow): string =>
     keys.map((k) => (row.values[k] === null || row.values[k] === undefined ? '\u0000' : String(row.values[k]))).join('\u0001');
 
@@ -134,6 +149,33 @@ export function keyQualityCheck(leftFile: CsvFile, rightFile: CsvFile, keys: str
   };
 
   const issues: KeyQualityIssue[] = [];
+
+  if (leftMissingKeys.length > 0) {
+    issues.push({
+      type: 'missing_key_left',
+      count: leftMissingKeys.length,
+      severity: 'error',
+      message: `左表缺少关联键：${leftMissingKeys.join('、')}，这些列在左表中完全不存在，匹配结果将全部为空或出错`,
+      sampleRows: leftMissingKeys.slice(0, 20).map((k) => ({
+        key: k,
+        extra: '列不存在于左表',
+        values: { 缺失列: k },
+      })),
+    });
+  }
+  if (rightMissingKeys.length > 0) {
+    issues.push({
+      type: 'missing_key_right',
+      count: rightMissingKeys.length,
+      severity: 'error',
+      message: `右表缺少关联键：${rightMissingKeys.join('、')}，这些列在右表中完全不存在，匹配结果将全部为空或出错`,
+      sampleRows: rightMissingKeys.slice(0, 20).map((k) => ({
+        key: k,
+        extra: '列不存在于右表',
+        values: { 缺失列: k },
+      })),
+    });
+  }
 
   if (leftNulls.length > 0) {
     issues.push({
@@ -227,7 +269,49 @@ export function keyQualityCheck(leftFile: CsvFile, rightFile: CsvFile, keys: str
     });
   }
 
-  const hasCriticalIssue = issues.some((i) => i.severity === 'error');
+  if (onlyLeftKeys.length > 0) {
+    const leftSamples: KeyQualityIssue['sampleRows'] = [];
+    for (const k of onlyLeftKeys.slice(0, 20)) {
+      const row = leftKeyFirstIdx.get(k);
+      leftSamples.push({
+        key: k,
+        rowIndex: row?._index,
+        rowId: row?._id,
+        values: takeKeyVals(row),
+        extra: `仅左表有，右表找不到匹配`,
+      });
+    }
+    issues.push({
+      type: 'only_left',
+      count: onlyLeftKeys.length,
+      severity: onlyLeftKeys.length > leftUniqueKeys * 0.2 ? 'warning' : 'info',
+      message: `仅左表存在的键：${onlyLeftKeys.length} 个，占左唯一键 ${(onlyLeftKeys.length / Math.max(leftUniqueKeys, 1) * 100).toFixed(1)}%，这些行将成为左独有`,
+      sampleRows: leftSamples,
+    });
+  }
+
+  if (onlyRightKeys.length > 0) {
+    const rightSamples: KeyQualityIssue['sampleRows'] = [];
+    for (const k of onlyRightKeys.slice(0, 20)) {
+      const row = rightKeyFirstIdx.get(k);
+      rightSamples.push({
+        key: k,
+        rowIndex: row?._index,
+        rowId: row?._id,
+        values: takeKeyVals(row),
+        extra: `仅右表有，左表找不到匹配`,
+      });
+    }
+    issues.push({
+      type: 'only_right',
+      count: onlyRightKeys.length,
+      severity: onlyRightKeys.length > rightUniqueKeys * 0.2 ? 'warning' : 'info',
+      message: `仅右表存在的键：${onlyRightKeys.length} 个，占右唯一键 ${(onlyRightKeys.length / Math.max(rightUniqueKeys, 1) * 100).toFixed(1)}%，这些行将成为右独有`,
+      sampleRows: rightSamples,
+    });
+  }
+
+  const hasCriticalIssue = issues.some((i) => i.severity === 'error') || leftMissingKeys.length > 0 || rightMissingKeys.length > 0;
   const hasSeverityCount = issues.length;
   const overallRisk: KeyQualityReport['overallRisk'] = hasCriticalIssue
     ? 'high'

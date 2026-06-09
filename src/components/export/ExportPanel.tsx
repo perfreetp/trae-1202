@@ -2,7 +2,15 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { useFileStore } from '../../store/useFileStore';
 import { useUiStore } from '../../store/useUiStore';
 import { useWorkflowStore } from '../../store/useWorkflowStore';
-import { exportFile, triggerDownload, type ExportFormat, type ExportRange, type ExportOptions } from '../../engine/exporter';
+import {
+  exportFile,
+  triggerDownload,
+  type ExportFormat,
+  type ExportRange,
+  type ExportOptions,
+  buildAuditReport,
+  type AuditReport,
+} from '../../engine/exporter';
 import type { CsvFile, DataRow } from '../../engine/types';
 import { Button } from '../common/Button';
 import { Select, Checkbox, Input } from '../common/Form';
@@ -30,6 +38,19 @@ import {
   ChevronDown,
   ChevronUp,
   X,
+  ArrowUp,
+  ArrowDown,
+  ChevronsUp,
+  ChevronsDown,
+  GripVertical,
+  Calendar,
+  Clock,
+  FileSignature,
+  Tag,
+  Sparkles,
+  BarChart3,
+  AlertTriangle,
+  FileSearch,
 } from 'lucide-react';
 
 const PREVIEW_ROW_LIMIT = 20;
@@ -48,9 +69,11 @@ interface ExportPreset {
     bom: boolean;
     sampleSize: number;
     includeTrackingCols: boolean;
+    includeAuditReport: boolean;
     columnMode: 'all' | 'custom';
-    // columns 保存列名数组；若 columnMode=all 则忽略
     selectedColumns?: string[];
+    fileNameRule?: string;
+    fileNamePrefix?: string;
   };
 }
 
@@ -90,15 +113,73 @@ function getExportScopeRows(f: CsvFile, range: ExportRange, selectedIds: Set<str
   }
 }
 
+// ===== 文件名规则系统 =====
+const DEFAULT_FILE_RULE = '{前缀}{原文件名}_{日期}_{时间}_已处理';
+
+const FILE_RULE_TOKENS = [
+  { token: '{前缀}', label: '固定前缀', icon: <Tag size={12} /> },
+  { token: '{原文件名}', label: '原文件名', icon: <FileSignature size={12} /> },
+  { token: '{日期}', label: '当前日期', icon: <Calendar size={12} /> },
+  { token: '{时间}', label: '当前时间', icon: <Clock size={12} /> },
+  { token: '{步骤名}', label: '最后步骤名', icon: <Sparkles size={12} /> },
+];
+
+function pad(n: number): string {
+  return n < 10 ? '0' + n : '' + n;
+}
+
+function resolveFileNameRule(rule: string, prefix: string, originalName: string, stepName: string): string {
+  const now = new Date();
+  const dateStr = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+  const timeStr = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const cleanName = (originalName || 'export').replace(/\.(csv|xlsx)$/i, '');
+  const cleanStep = (stepName || '').replace(/[\\/:*?"<>|]/g, '_');
+  let out = rule || DEFAULT_FILE_RULE;
+  out = out.replace(/\{前缀\}/g, prefix || '');
+  out = out.replace(/\{原文件名\}/g, cleanName);
+  out = out.replace(/\{日期\}/g, dateStr);
+  out = out.replace(/\{时间\}/g, timeStr);
+  out = out.replace(/\{步骤名\}/g, cleanStep);
+  // 去掉非法文件名字符
+  out = out.replace(/[\\/:*?"<>|]/g, '_');
+  return out;
+}
+
+// ===== 导出列顺序 =====
+function reorderCols(cols: string[], from: number, to: number): string[] {
+  if (from < 0 || to < 0 || from >= cols.length || to >= cols.length || from === to) return cols;
+  const next = [...cols];
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item);
+  return next;
+}
+
+function moveColToTop(cols: string[], idx: number): string[] {
+  if (idx <= 0) return cols;
+  const next = [...cols];
+  const [item] = next.splice(idx, 1);
+  next.unshift(item);
+  return next;
+}
+function moveColToBottom(cols: string[], idx: number): string[] {
+  if (idx < 0 || idx >= cols.length - 1) return cols;
+  const next = [...cols];
+  const [item] = next.splice(idx, 1);
+  next.push(item);
+  return next;
+}
+
 export const ExportPanel: React.FC = () => {
   const f = useFileStore((s) => s.getActiveFile());
   const { selectedRowIds, clearSelection } = useFileStore();
   const { showToast } = useUiStore();
   const addStep = useWorkflowStore((s) => s.addStep);
+  const steps = useWorkflowStore((s) => s.steps);
 
   // --- State ---
   const [format, setFormat] = useState<ExportFormat>('csv');
-  const [fileName, setFileName] = useState('');
+  const [fileNameRule, setFileNameRule] = useState<string>(DEFAULT_FILE_RULE);
+  const [fileNamePrefix, setFileNamePrefix] = useState<string>('');
   const [encoding, setEncoding] = useState('UTF-8');
   const [delimiter, setDelimiter] = useState(',');
   const [range, setRange] = useState<ExportRange>('all');
@@ -107,6 +188,10 @@ export const ExportPanel: React.FC = () => {
   const [sampleSize, setSampleSize] = useState(100);
   const [cols, setCols] = useState<string[]>(f?.headers ?? []);
   const [includeTrackingCols, setIncludeTrackingCols] = useState(true);
+  const [includeAuditReport, setIncludeAuditReport] = useState(false);
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [dragColFrom, setDragColFrom] = useState<number | null>(null);
+  const [dragColOver, setDragColOver] = useState<number | null>(null);
 
   // --- Presets ---
   const [presets, setPresetsState] = useState<ExportPreset[]>(() => loadPresets());
@@ -123,11 +208,15 @@ export const ExportPanel: React.FC = () => {
     savePresets(next);
   };
 
+  const lastStepName = useMemo(() => {
+    if (!steps || steps.length === 0) return '';
+    return steps[steps.length - 1].label || '';
+  }, [steps]);
+
   // --- 初始化：首次加载 f 时设置默认值 ---
   useEffect(() => {
     if (f) {
       setCols(f.headers);
-      setFileName(f.name.replace(/\.(csv|xlsx)$/i, '') + '_已处理');
     }
   }, [f?.id]);
 
@@ -149,11 +238,14 @@ export const ExportPanel: React.FC = () => {
     ? selectedRowIds.size
     : Math.min(sampleSize, f?.rowCount ?? 0);
 
-  const finalFileName = useMemo(() => {
-    if (!f) return `export.${format}`;
-    const base = fileName?.trim() || f.name.replace(/\.(csv|xlsx)$/i, '');
-    return `${base}.${format}`;
-  }, [fileName, f?.name, format, f]);
+  const resolvedFileName = useMemo(() => {
+    if (!f) return `export`;
+    return resolveFileNameRule(fileNameRule, fileNamePrefix, f.name, lastStepName);
+  }, [fileNameRule, fileNamePrefix, f?.name, lastStepName, f]);
+
+  const finalFileName = useMemo(() => `${resolvedFileName}.${format}`, [resolvedFileName, format]);
+
+  const auditReport: AuditReport | null = useMemo(() => (f ? buildAuditReport(f) : null), [f?.id, f?.rowCount]);
 
   const scopeRows = useMemo(() => {
     if (!f) return [];
@@ -166,7 +258,7 @@ export const ExportPanel: React.FC = () => {
     if (!f) return;
     const options: ExportOptions = {
       format,
-      fileName: fileName || f.name,
+      fileName: resolvedFileName,
       encoding,
       delimiter,
       range,
@@ -175,16 +267,24 @@ export const ExportPanel: React.FC = () => {
       sampleSize,
       selectedRowIds: Array.from(selectedRowIds),
       columns: finalCols,
+      includeAuditReport,
     };
     try {
-      const { blob, fileName: finalName } = exportFile(f, options);
-      triggerDownload(blob, finalName);
+      const { blob, fileName, auditBlob, auditFileName } = exportFile(f, options);
+      triggerDownload(blob, fileName);
+      if (auditBlob && auditFileName) {
+        setTimeout(() => triggerDownload(auditBlob!, auditFileName!), 300);
+      }
       addStep({
         type: 'EXPORT',
-        payload: { format, fileName: finalName, encoding },
-        label: `导出 ${finalName} (${format.toUpperCase()})`,
+        payload: { format, fileName, encoding, includeAuditReport },
+        label: `导出 ${fileName} (${format.toUpperCase()})${includeAuditReport ? ' + 审计报告' : ''}`,
       });
-      showToast({ type: 'success', message: `导出成功：${finalName} (${formatBytes(blob.size)})` });
+      const totalSize = blob.size + (auditBlob?.size ?? 0);
+      showToast({
+        type: 'success',
+        message: `导出成功：${fileName}${auditFileName ? ` + ${auditFileName}` : ''} (${formatBytes(totalSize)})`,
+      });
     } catch (e) {
       showToast({ type: 'error', message: `导出失败: ${(e as Error).message}` });
     }
@@ -202,6 +302,10 @@ export const ExportPanel: React.FC = () => {
     sample: `抽样前 ${formatNumber(sampleSize)} 行`,
   }[range];
 
+  const insertRuleToken = (token: string) => {
+    setFileNameRule((prev) => (prev || '') + token);
+  };
+
   // --- Preset actions ---
   const handleSaveAsPreset = () => {
     const name = newPresetName.trim() || `方案 ${presets.length + 1}`;
@@ -218,8 +322,11 @@ export const ExportPanel: React.FC = () => {
         bom,
         sampleSize,
         includeTrackingCols,
+        includeAuditReport,
         columnMode: cols.length === f?.headers.length ? 'all' : 'custom',
         selectedColumns: cols.length === f?.headers.length ? undefined : [...cols],
+        fileNameRule,
+        fileNamePrefix,
       },
     };
     persistPresets([...presets, preset]);
@@ -241,9 +348,14 @@ export const ExportPanel: React.FC = () => {
     setBom(config.bom);
     setSampleSize(config.sampleSize);
     setIncludeTrackingCols(config.includeTrackingCols);
+    setIncludeAuditReport(!!config.includeAuditReport);
+    if (config.fileNameRule !== undefined) setFileNameRule(config.fileNameRule);
+    if (config.fileNamePrefix !== undefined) setFileNamePrefix(config.fileNamePrefix);
     if (config.columnMode === 'custom' && config.selectedColumns) {
-      // 只保留当前文件中实际存在的列
-      setCols(config.selectedColumns.filter((c) => f.headers.includes(c)));
+      // 存在的列按方案顺序排，新出现的列（方案中没有的）追加到后面
+      const existing = config.selectedColumns.filter((c) => f.headers.includes(c));
+      const newCols = f.headers.filter((c) => !config.selectedColumns!.includes(c));
+      setCols([...existing, ...newCols]);
     } else {
       setCols([...f.headers]);
     }
@@ -279,6 +391,17 @@ export const ExportPanel: React.FC = () => {
     setRenameModalOpen(false);
     setRenameTargetId('');
     showToast({ type: 'success', message: `已重命名为：${name}` });
+  };
+
+  // --- 列顺序动作 ---
+  const handleMoveCol = (idx: number, action: 'up' | 'down' | 'top' | 'bottom') => {
+    setCols((prev) => {
+      if (action === 'up') return reorderCols(prev, idx, idx - 1);
+      if (action === 'down') return reorderCols(prev, idx, idx + 1);
+      if (action === 'top') return moveColToTop(prev, idx);
+      if (action === 'bottom') return moveColToBottom(prev, idx);
+      return prev;
+    });
   };
 
   if (!f) {
@@ -320,6 +443,7 @@ export const ExportPanel: React.FC = () => {
                               </div>
                               <div className="text-[10.5px] text-slate-400 truncate">
                                 {p.config.format.toUpperCase()} · {p.config.encoding} · {p.config.range}
+                                {p.config.includeAuditReport && ' · 含审计'}
                               </div>
                             </button>
                             <div className="flex gap-1 shrink-0">
@@ -354,6 +478,59 @@ export const ExportPanel: React.FC = () => {
               </Badge>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* 文件名规则配置 */}
+      <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="text-sm font-semibold text-slate-800 flex items-center gap-1.5">
+            <FileSignature size={14} /> 文件名规则（支持占位符组合）
+          </div>
+          <Badge size="sm" variant="info">
+            预览：{finalFileName}
+          </Badge>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Input
+            label="自定义前缀（替换 {前缀}）"
+            value={fileNamePrefix}
+            onChange={setFileNamePrefix}
+            placeholder="例如：Q3_报表_"
+            leftIcon={<Tag size={14} />}
+          />
+          <div className="space-y-1">
+            <label className="text-[11px] font-medium text-slate-600 block">快捷插入占位符</label>
+            <div className="flex flex-wrap gap-1.5">
+              {FILE_RULE_TOKENS.map((t) => (
+                <button
+                  key={t.token}
+                  onClick={() => insertRuleToken(t.token)}
+                  className="px-2 py-1 text-[11px] rounded-md border border-slate-200 bg-slate-50 hover:bg-teal-50 hover:border-teal-300 hover:text-teal-700 flex items-center gap-1 transition"
+                  title={`插入 ${t.label}`}
+                >
+                  {t.icon}
+                  {t.token}
+                </button>
+              ))}
+              <button
+                onClick={() => { setFileNameRule(DEFAULT_FILE_RULE); setFileNamePrefix(''); }}
+                className="px-2 py-1 text-[11px] rounded-md border border-slate-200 bg-white text-slate-500 hover:border-rose-300 hover:text-rose-600"
+              >
+                <X size={12} className="inline" /> 重置默认
+              </button>
+            </div>
+          </div>
+        </div>
+        <Input
+          label="文件名规则模板（不含扩展名）"
+          value={fileNameRule}
+          onChange={setFileNameRule}
+          placeholder="例如：{前缀}{原文件名}_{日期}_{时间}_已处理"
+        />
+        <div className="text-[11px] text-slate-500 rounded-lg bg-slate-50 border border-slate-200 p-2.5 space-y-0.5">
+          <div>💡 当前解析结果：<span className="font-mono text-teal-700 font-semibold">{finalFileName}</span></div>
+          <div>占位符会在实际导出时动态替换；同类文件套用方案时按新文件自动生成</div>
         </div>
       </div>
 
@@ -399,7 +576,7 @@ export const ExportPanel: React.FC = () => {
                 <div className="text-base font-semibold text-slate-900">Excel 工作簿</div>
                 {format === 'xlsx' && <CheckCircle2 size={18} className="text-emerald-600" />}
               </div>
-              <div className="text-xs text-slate-500 mt-1">原生 .xlsx 格式；保留列宽样式；直接双击打开</div>
+              <div className="text-xs text-slate-500 mt-1">原生 .xlsx 格式；保留列宽样式；审计报告将生成单独工作表</div>
               <div className="flex gap-1.5 mt-2">
                 <Badge size="sm" variant="success">.xlsx</Badge>
                 <Badge size="sm" variant="warning">Excel</Badge>
@@ -414,7 +591,6 @@ export const ExportPanel: React.FC = () => {
           <div className="text-sm font-semibold text-slate-800 flex items-center gap-1.5">
             <Settings2 size={14} /> 基本设置
           </div>
-          <Input label="文件名（不含扩展名）" value={fileName} onChange={setFileName} />
           <Select
             label="导出范围"
             value={range}
@@ -427,36 +603,139 @@ export const ExportPanel: React.FC = () => {
             ]}
           />
           {range === 'sample' && <Input label="抽样行数" type="number" value={String(sampleSize)} onChange={(v) => setSampleSize(Number(v) || 100)} />}
+
+          {/* ==== 列顺序调整区 ==== */}
           <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-medium text-slate-700">导出列（<span className="text-teal-600">{cols.length}</span> / {f.headers.length}）</div>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="text-xs font-medium text-slate-700 flex items-center gap-1.5">
+                <Layers size={12} />
+                导出列顺序（<span className="text-teal-600 font-bold">{cols.length}</span> / {f.headers.length}）
+              </div>
               <div className="flex gap-1.5">
                 <button className="text-[11px] px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-600" onClick={() => setCols([...f.headers])}>全选</button>
                 <button className="text-[11px] px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-600" onClick={() => setCols([])}>清空</button>
+                <button className="text-[11px] px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-600" onClick={() => setCols([...cols].sort())}>A→Z 排序</button>
               </div>
             </div>
-            <div className="flex flex-wrap gap-1.5 p-2 bg-slate-50 rounded border border-slate-200 max-h-32 overflow-y-auto">
-              {f.headers.map((h) => {
-                const active = cols.includes(h);
-                const isTracking = h.startsWith('_');
-                return (
-                  <button
-                    key={h}
-                    onClick={() => setCols(active ? cols.filter((x) => x !== h) : [...cols, h])}
-                    className={cn(
-                      'px-2 py-0.5 text-[11px] rounded border transition',
-                      active ? 'bg-teal-600 text-white border-teal-600' : 'bg-white text-slate-600 border-slate-200 hover:border-teal-400',
-                      isTracking && !active && 'border-sky-200 text-sky-700'
-                    )}
-                  >
-                    {active ? '✓ ' : ''}
-                    {h}
-                    {isTracking && <span className="ml-0.5 text-[9px] opacity-70">[追踪]</span>}
-                  </button>
-                );
-              })}
+            <div className="border border-slate-200 rounded-lg overflow-hidden max-h-64 overflow-y-auto">
+              {cols.length === 0 ? (
+                <div className="p-4 text-center text-[11px] text-slate-400">
+                  暂未选择任何列；点击上方「全选」或点击下方表头列名开始调整顺序
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-100">
+                  {cols.map((h, idx) => {
+                    const isTracking = h.startsWith('_');
+                    return (
+                      <div
+                        key={h}
+                        draggable
+                        onDragStart={() => setDragColFrom(idx)}
+                        onDragOver={(e) => { e.preventDefault(); setDragColOver(idx); }}
+                        onDragLeave={() => setDragColOver((o) => (o === idx ? null : o))}
+                        onDrop={() => {
+                          if (dragColFrom !== null && dragColFrom !== idx) {
+                            setCols((prev) => reorderCols(prev, dragColFrom, idx));
+                          }
+                          setDragColFrom(null);
+                          setDragColOver(null);
+                        }}
+                        onDragEnd={() => { setDragColFrom(null); setDragColOver(null); }}
+                        className={cn(
+                          'group flex items-center gap-1.5 px-2.5 py-1.5 bg-white hover:bg-slate-50 transition cursor-move',
+                          dragColOver === idx && 'bg-teal-50 ring-1 ring-inset ring-teal-300'
+                        )}
+                      >
+                        <span className="shrink-0 text-slate-300 group-hover:text-slate-500 cursor-grab active:cursor-grabbing">
+                          <GripVertical size={12} />
+                        </span>
+                        <span className="w-6 shrink-0 text-[10px] font-mono text-slate-400 tabular-nums text-right">{idx + 1}</span>
+                        <input
+                          type="checkbox"
+                          checked={cols.includes(h)}
+                          onChange={() => setCols(cols.filter((x) => x !== h))}
+                          onClick={(e) => e.stopPropagation()}
+                          className="w-3.5 h-3.5 rounded text-teal-600 border-slate-300 focus:ring-teal-500 shrink-0"
+                          title="取消选中该列"
+                        />
+                        <span className={cn(
+                          'flex-1 min-w-0 text-xs truncate',
+                          isTracking ? 'text-sky-700 font-medium' : 'text-slate-700'
+                        )}>
+                          {h}
+                          {isTracking && <span className="ml-1 text-[9px] text-sky-500">[追踪]</span>}
+                        </span>
+                        <div className="flex gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleMoveCol(idx, 'top'); }}
+                            disabled={idx === 0}
+                            title="置顶"
+                            className="p-1 rounded hover:bg-teal-100 text-slate-500 disabled:opacity-30"
+                          >
+                            <ChevronsUp size={12} />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleMoveCol(idx, 'up'); }}
+                            disabled={idx === 0}
+                            title="上移"
+                            className="p-1 rounded hover:bg-teal-100 text-slate-500 disabled:opacity-30"
+                          >
+                            <ArrowUp size={12} />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleMoveCol(idx, 'down'); }}
+                            disabled={idx === cols.length - 1}
+                            title="下移"
+                            className="p-1 rounded hover:bg-teal-100 text-slate-500 disabled:opacity-30"
+                          >
+                            <ArrowDown size={12} />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleMoveCol(idx, 'bottom'); }}
+                            disabled={idx === cols.length - 1}
+                            title="置底"
+                            className="p-1 rounded hover:bg-teal-100 text-slate-500 disabled:opacity-30"
+                          >
+                            <ChevronsDown size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
+            {/* 不在 cols 里但存在于文件的列，点一下即可追加到末尾 */}
+            {(() => {
+              const unselected = f.headers.filter((h) => !cols.includes(h));
+              if (unselected.length === 0) return null;
+              return (
+                <div className="mt-1">
+                  <div className="text-[10.5px] text-slate-400 mb-1">
+                    未勾选的列（点击即可追加到导出列表末尾）：
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {unselected.map((h) => (
+                      <button
+                        key={h}
+                        onClick={() => setCols([...cols, h])}
+                        className={cn(
+                          'px-1.5 py-0.5 text-[10.5px] rounded border border-dashed',
+                          h.startsWith('_')
+                            ? 'border-sky-200 bg-sky-50 text-sky-600 hover:bg-sky-100'
+                            : 'border-slate-300 bg-slate-50 text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+                        )}
+                        title={`追加 ${h} 到末尾`}
+                      >
+                        + {h}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
+
           {hasAnyTrackingCol && (
             <Checkbox
               checked={includeTrackingCols}
@@ -464,6 +743,64 @@ export const ExportPanel: React.FC = () => {
               label="自动包含追踪列（_匹配状态/行号等，即使列没勾选也会加到最前面）"
             />
           )}
+
+          {/* ==== 审计报告开关 ==== */}
+          <div className="rounded-lg border border-slate-200 bg-slate-50/50 p-2.5 space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <Checkbox
+                checked={includeAuditReport}
+                onChange={setIncludeAuditReport}
+                label={
+                  <span className="flex items-center gap-1 text-xs font-medium text-slate-700">
+                    <BarChart3 size={13} className="text-violet-600" />
+                    附带导出数据审计报告
+                  </span>
+                }
+              />
+              <button
+                onClick={() => setAuditOpen((o) => !o)}
+                className="text-[11px] px-2 py-0.5 rounded bg-white border border-slate-200 text-slate-600 hover:border-violet-300 hover:text-violet-700 flex items-center gap-1 shrink-0"
+              >
+                <FileSearch size={12} />
+                {auditOpen ? '收起报告' : '查看报告'}
+              </button>
+            </div>
+            {auditReport && (
+              <div className="flex flex-wrap gap-1.5 text-[10.5px] text-slate-500">
+                <Badge size="sm" variant="default">总行 {formatNumber(auditReport.summary.totalRows)}</Badge>
+                <Badge size="sm" variant={auditReport.summary.nullRows > 0 ? 'warning' : 'success'}>
+                  空值行 {formatNumber(auditReport.summary.nullRows)}
+                </Badge>
+                <Badge size="sm" variant={auditReport.summary.duplicateRows > 0 ? 'danger' : 'success'}>
+                  重复行 {formatNumber(auditReport.summary.duplicateRows)}
+                </Badge>
+                <Badge size="sm" variant="warning">
+                  修改 {formatNumber(auditReport.summary.modifiedRows)}
+                </Badge>
+                <Badge size="sm" variant="danger">
+                  左独 {formatNumber(auditReport.summary.leftOnlyRows)}
+                </Badge>
+                <Badge size="sm" variant="info">
+                  右独 {formatNumber(auditReport.summary.rightOnlyRows)}
+                </Badge>
+                <Badge size="sm" variant={auditReport.summary.typeAnomalyColumns > 0 ? 'warning' : 'success'}>
+                  异常列 {formatNumber(auditReport.summary.typeAnomalyColumns)}
+                </Badge>
+              </div>
+            )}
+            {includeAuditReport && (
+              <div className={cn(
+                'text-[10.5px] rounded p-2 mt-1',
+                format === 'xlsx'
+                  ? 'bg-emerald-50 border border-emerald-200 text-emerald-700'
+                  : 'bg-sky-50 border border-sky-200 text-sky-700'
+              )}>
+                {format === 'xlsx'
+                  ? '📑 Excel 模式：审计报告将作为第二个工作表（「数据审计报告」）写入同一个 .xlsx 文件'
+                  : '📄 CSV 模式：将额外生成一个独立的 <文件名>_审计报告.csv 与主文件一起下载'}
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
@@ -515,7 +852,54 @@ export const ExportPanel: React.FC = () => {
               <span>导出格式</span>
               <Badge variant={format === 'csv' ? 'info' : 'success'} size="sm">.{format}</Badge>
             </div>
+            {includeAuditReport && (
+              <div className="flex justify-between pt-1 border-t border-slate-200 mt-1">
+                <span>审计报告</span>
+                <Badge variant="warning" size="sm">
+                  {format === 'xlsx' ? '第2个工作表' : '额外CSV'}
+                </Badge>
+              </div>
+            )}
           </div>
+
+          {/* ==== 审计报告预览表（折叠展开） ==== */}
+          {auditOpen && auditReport && (
+            <div className="rounded-lg border border-violet-200 bg-violet-50/30 overflow-hidden">
+              <div className="px-2.5 py-1.5 border-b border-violet-200 bg-violet-100/50 flex items-center justify-between">
+                <div className="text-[11px] font-semibold text-violet-900 flex items-center gap-1">
+                  <BarChart3 size={12} /> 数据审计报告（完整内容随导出下载）
+                </div>
+                <AlertTriangle size={12} className="text-violet-600" />
+              </div>
+              <div className="max-h-60 overflow-auto bg-white">
+                <table className="w-full text-[10.5px]">
+                  <thead className="bg-slate-50 sticky top-0 z-10">
+                    <tr>
+                      <th className="px-2 py-1 text-left whitespace-nowrap border-r border-slate-200 w-24">分类</th>
+                      <th className="px-2 py-1 text-left whitespace-nowrap border-r border-slate-200 w-28">指标</th>
+                      <th className="px-2 py-1 text-left whitespace-nowrap border-r border-slate-200">数值</th>
+                      <th className="px-2 py-1 text-left whitespace-nowrap">备注</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {auditReport.rows.slice(0, 50).map((r, i) => (
+                      <tr key={i} className={r.category === '📊 各列明细' && i > 0 ? 'bg-slate-50/60' : ''}>
+                        <td className="px-2 py-1 whitespace-nowrap border-r border-slate-100 text-slate-500">{r.category}</td>
+                        <td className="px-2 py-1 whitespace-nowrap border-r border-slate-100 font-medium text-slate-700">{r.metric}</td>
+                        <td className="px-2 py-1 whitespace-nowrap border-r border-slate-100 text-slate-900 font-mono tabular-nums">{r.value}</td>
+                        <td className="px-2 py-1 whitespace-nowrap text-slate-500">{r.note || <span className="text-slate-300">-</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {auditReport.rows.length > 50 && (
+                <div className="px-2.5 py-1 border-t border-violet-200 bg-violet-50 text-[10.5px] text-violet-700 text-center">
+                  已省略 {formatNumber(auditReport.rows.length - 50)} 行列明细，完整内容见导出文件
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -527,6 +911,7 @@ export const ExportPanel: React.FC = () => {
           <Badge size="sm" variant="success" className="ml-1">范围：{rangeLabel}</Badge>
           <Badge size="sm" variant="default" className="ml-1">表头：{includeHeader ? '包含' : '不包含'}</Badge>
           <Badge size="sm" variant="warning" className="ml-1">格式：{format.toUpperCase()}</Badge>
+          {includeAuditReport && <Badge size="sm" variant="danger" className="ml-1">+ 审计报告</Badge>}
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
@@ -618,7 +1003,7 @@ export const ExportPanel: React.FC = () => {
             </Button>
           )}
           <Button variant="primary" size="lg" onClick={doExport} disabled={finalCols.length === 0 || estimatedRows === 0} leftIcon={<Download size={16} />}>
-            下载 {format.toUpperCase()} 文件
+            下载 {format.toUpperCase()} 文件{includeAuditReport ? ' + 审计' : ''}
           </Button>
         </div>
       </div>
@@ -639,8 +1024,10 @@ export const ExportPanel: React.FC = () => {
           <div className="space-y-3">
             <Input label="方案名称" value={newPresetName} onChange={setNewPresetName} placeholder="给这套导出配置起个名字" />
             <div className="text-xs text-slate-500 rounded-lg bg-slate-50 border border-slate-200 p-3 space-y-1">
-              <div>将保存：格式、编码、分隔符、范围、是否带表头/BOM、抽样大小、列选择</div>
-              <div>方案会保存到浏览器本地存储，刷新页面仍然存在</div>
+              <div>🗂 将保存：格式、编码、分隔符、范围、表头、BOM、抽样大小、列+顺序、追踪列、审计开关</div>
+              <div>🏷 文件名规则 + 自定义前缀也会一起保存</div>
+              <div>💾 方案保存到浏览器本地存储，刷新页面仍然存在</div>
+              <div>🧩 套用方案时：存在的列按方案顺序排列，新列自动追加到末尾</div>
             </div>
           </div>
         </Modal>
